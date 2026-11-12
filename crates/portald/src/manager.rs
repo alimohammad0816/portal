@@ -571,6 +571,9 @@ impl Manager {
                 && split != Some(SplitMode::Include),
             daemon_cgroup: self.daemon_cgroup.clone(),
             resolver_cgroup: self.resolver_cgroup.clone(),
+            server: active
+                .then(|| self.status.server_ip.as_deref()?.parse().ok())
+                .flatten(),
             split,
         }
     }

@@ -33,6 +33,10 @@ pub struct Plan {
     /// cgroup of systemd-resolved, allowed to resolve the server's name
     /// while connecting.
     pub resolver_cgroup: Option<String>,
+    /// Address of the VPN server once connected. With DCO the kernel sends
+    /// the encrypted packets itself, outside the daemon's cgroup, so the
+    /// cgroup rule alone would block the tunnel.
+    pub server: Option<std::net::IpAddr>,
     /// Split tunneling mode while it's running.
     pub split: Option<SplitMode>,
 }
@@ -67,6 +71,11 @@ pub fn ruleset(plan: &Plan) -> String {
     // DNS proxy asking the physical network's resolvers.
     if let Some(cg) = &plan.daemon_cgroup {
         rules.push(format!("{} accept", cgroup_rule(cg)));
+    }
+    match plan.server {
+        Some(std::net::IpAddr::V4(ip)) => rules.push(format!("ip daddr {ip} accept")),
+        Some(std::net::IpAddr::V6(ip)) => rules.push(format!("ip6 daddr {ip} accept")),
+        None => {}
     }
 
     if plan.connected && plan.dns_guard {
@@ -290,6 +299,24 @@ mod tests {
     }
 
     #[test]
+    fn kill_switch_lets_the_kernel_reach_the_server() {
+        let s = ruleset(&Plan {
+            block: true,
+            connected: true,
+            server: Some("79.127.59.71".parse().unwrap()),
+            ..base()
+        });
+        let server = s.find("ip daddr 79.127.59.71 accept").unwrap();
+        assert!(server < s.rfind("reject").unwrap());
+        let s = ruleset(&Plan {
+            block: true,
+            server: Some("2001:db8::1".parse().unwrap()),
+            ..base()
+        });
+        assert!(s.contains("ip6 daddr 2001:db8::1 accept"));
+    }
+
+    #[test]
     fn no_lan_exception_when_disallowed() {
         let s = ruleset(&Plan {
             block: true,
@@ -340,6 +367,12 @@ mod tests {
             Plan {
                 block: true,
                 connected: true,
+                server: Some("203.0.113.24".parse().unwrap()),
+                ..real.clone()
+            },
+            Plan {
+                block: true,
+                server: Some("2001:db8::1".parse().unwrap()),
                 ..real.clone()
             },
             Plan {
