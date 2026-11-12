@@ -528,8 +528,13 @@ mod tests {
         // ...until no listed name claims it.
         let gone = proxy.set_domains(DomainList::new(&[Rule::parse("other.org").unwrap()]));
         assert_eq!(gone, vec!["93.184.216.34".parse::<IpAddr>().unwrap()]);
+        // A plain name is exact; its subdomains need the wildcard.
         proxy.set_domains(DomainList::new(&[Rule::parse("example.com").unwrap()]));
         client.send(&query(3, "a.example.com")).await.unwrap();
+        client.recv(&mut buf).await.unwrap();
+        assert!(rx.try_recv().is_err());
+        proxy.set_domains(DomainList::new(&[Rule::parse("*.example.com").unwrap()]));
+        client.send(&query(4, "a.example.com")).await.unwrap();
         client.recv(&mut buf).await.unwrap();
         assert!(rx.recv().await.is_some());
         proxy.stop();
@@ -585,9 +590,9 @@ mod tests {
         assert_eq!(gone, vec![ip("46.36.99.104")]);
         // digikala.com still holds the shared address.
         assert!(l.prune(&list(&["digikala.com"]), later).is_empty());
-        assert_eq!(l.matching(&list(&["com"]), later), vec![ip("2.144.1.1")]);
+        assert_eq!(l.matching(&list(&["*.com"]), later), vec![ip("2.144.1.1")]);
         assert!(
-            l.matching(&list(&["ir"]), later).is_empty(),
+            l.matching(&list(&["*.ir"]), later).is_empty(),
             "pruned names don't count"
         );
         assert_eq!(l.prune(&list(&[]), later), vec![ip("2.144.1.1")]);
@@ -596,7 +601,7 @@ mod tests {
 
     #[test]
     fn routes_by_mode() {
-        let rules = [Rule::parse("ir").unwrap()];
+        let rules = [Rule::parse("*.ir").unwrap()];
         let mut cfg = ProxyConfig {
             mode: SplitMode::Exclude,
             domains: DomainList::new(&rules),

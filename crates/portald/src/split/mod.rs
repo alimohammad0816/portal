@@ -70,7 +70,7 @@ impl Pending {
 fn domain_rules(s: &SplitSettings) -> Vec<Rule> {
     rules(s)
         .into_iter()
-        .filter(|r| matches!(r, Rule::Domain(_)))
+        .filter(|r| matches!(r, Rule::Domain(_) | Rule::Subdomains(_)))
         .collect()
 }
 

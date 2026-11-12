@@ -6,7 +6,7 @@ split tunneling and a kill switch that apply without reconnecting.
 
 <p align="center">
   <img src="docs/screenshots/main.png" width="260" alt="Main window, connected to Frankfurt">
-  <img src="docs/screenshots/split.png" width="260" alt="Split tunneling settings">
+  <img src="docs/screenshots/split.png" width="260" alt="Split tunneling settings: apps, site rules and the Apply bar">
   <img src="docs/screenshots/network.png" width="260" alt="Kill switch and network settings">
 </p>
 
@@ -212,6 +212,19 @@ Pick apps, domains, IPs/networks and whole countries, then either
 **exclude** them from the VPN (everything else uses it) or use the VPN
 **only** for them. Rule changes apply to the running connection; switching
 between the two modes reconnects.
+
+| Rule | Matches |
+|---|---|
+| `sabtira.ir` | only `sabtira.ir` |
+| `api.sabtira.ir` | only `api.sabtira.ir` |
+| `*.sabtira.ir` | every subdomain (`www.sabtira.ir`, `a.b.sabtira.ir`), not `sabtira.ir` itself |
+| `*.ir` | every `.ir` domain |
+| `185.143.232.0/22`, `1.2.3.4` | that network or address |
+| Iran (country) | every IP range registered to Iran |
+
+For a whole site, add both `sabtira.ir` and `*.sabtira.ir`. Rules saved by
+0.1.5 and earlier, where a domain also covered its subdomains, are turned
+into that pair on upgrade, so they keep matching the same names.
 
 Open connections follow added rules right away: apps keep the addresses
 they already looked up, so those are split too, and connections the

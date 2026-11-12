@@ -25,10 +25,16 @@ export function hostKind(h: string): "CIDR" | "IP" | "Wildcard" | "Domain" {
 }
 
 const KIND_ICON = { Domain: Globe, Wildcard: Asterisk, IP: MapPin, CIDR: Network } as const;
+const KIND_TITLE = {
+  Domain: "only this name",
+  Wildcard: "every subdomain",
+  IP: "IP address",
+  CIDR: "network",
+} as const;
 
-/** `*.example.com` and `example.com` are the same rule. */
+/** Rules that mean the same: case and a trailing dot don't matter. */
 function hostKey(h: string): string {
-  return h.toLowerCase().replace(/^\*\./, "").replace(/\.$/, "");
+  return h.toLowerCase().replace(/\.$/, "");
 }
 
 function validHost(h: string): boolean {
@@ -214,7 +220,7 @@ function HostList({ hosts, onRemove }: { hosts: string[]; onRemove: (h: string) 
             return (
               <Chip
                 key={h}
-                title={`${h} (${kind})`}
+                title={`${h}: ${KIND_TITLE[kind]}`}
                 icon={<Icon className="size-3 shrink-0 text-dim" />}
                 label={h}
                 onRemove={() => onRemove(h)}
@@ -384,7 +390,7 @@ export function SplitSettings({
         <Section
           title="Sites and IP ranges"
           count={split.hosts.length}
-          hint="Domains include their subdomains; *.ir covers a whole TLD."
+          hint="example.com is just that name; *.example.com covers its subdomains, *.ir a whole TLD."
         >
           <div className="flex gap-2">
             <Input

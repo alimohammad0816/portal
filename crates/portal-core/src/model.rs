@@ -331,17 +331,47 @@ pub struct SplitApp {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SplitSettings {
     pub enabled: bool,
     pub mode: SplitMode,
     pub apps: Vec<SplitApp>,
-    /// Domains (`example.com` also covers subdomains, `*.ir` a whole TLD),
-    /// IP addresses and CIDR blocks.
+    /// Domains (`example.com` is just that name, `*.example.com` its
+    /// subdomains, `*.ir` a whole TLD), IP addresses and CIDR blocks.
     pub hosts: Vec<String>,
     /// ISO country codes whose IP ranges are split, e.g. `IR`.
     pub countries: Vec<String>,
+    /// Meaning of `hosts`; see `migrate`. Missing (older files and
+    /// clients) means 0, while new settings start at the current version.
+    #[serde(default)]
+    pub rules_version: u32,
+}
+
+impl Default for SplitSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: SplitMode::default(),
+            apps: Vec::new(),
+            hosts: Vec::new(),
+            countries: Vec::new(),
+            rules_version: Self::RULES_VERSION,
+        }
+    }
+}
+
+impl SplitSettings {
+    pub const RULES_VERSION: u32 = 1;
+
+    /// Bring hosts saved (or sent by an older client) under an earlier
+    /// meaning up to date. Version 0: a domain also covered its subdomains.
+    pub fn migrate(&mut self) {
+        if self.rules_version < 1 {
+            self.hosts = crate::split::migrate_hosts_v1(&self.hosts);
+        }
+        self.rules_version = Self::RULES_VERSION;
+    }
 }
 
 impl Default for Settings {

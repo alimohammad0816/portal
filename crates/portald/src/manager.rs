@@ -106,13 +106,15 @@ fn now() -> u64 {
 }
 
 fn load_settings(path: &PathBuf) -> Settings {
-    match std::fs::read(path) {
+    let mut s = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
             warn!("ignoring unreadable {}: {e}", path.display());
             Settings::default()
         }),
         Err(_) => Settings::default(),
-    }
+    };
+    s.split.migrate();
+    s
 }
 
 fn wants_include(s: &Settings) -> bool {
@@ -208,7 +210,9 @@ impl Manager {
         self.store.remove(id)
     }
 
-    pub fn set_settings(&mut self, new: Settings) -> Result<Settings> {
+    pub fn set_settings(&mut self, mut new: Settings) -> Result<Settings> {
+        // An older client still means "domain plus subdomains".
+        new.split.migrate();
         new.validate().map_err(|e| anyhow!(e))?;
         let old = std::mem::replace(&mut self.settings, new.clone());
         if let Err(e) = write_private(
@@ -623,8 +627,7 @@ impl Manager {
                 .filter_map(|h| Rule::parse(h).ok())
                 .collect::<Vec<_>>(),
         )
-        .suffixes()
-        .to_vec();
+        .routing_domains();
         if servers.is_empty() && proxy.is_none() {
             self.push_log("The server didn't push DNS servers; using the system's DNS.".into());
             self.dns_ready = false;

@@ -91,6 +91,8 @@ export interface SplitSettings {
   apps: SplitApp[];
   hosts: string[];
   countries: string[];
+  /** Meaning of `hosts`; the daemon keeps it current. */
+  rules_version?: number;
 }
 
 export interface InstalledApp {
