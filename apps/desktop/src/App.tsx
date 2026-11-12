@@ -652,7 +652,7 @@ export function App() {
       {/* Quick toggles */}
       <div className="mx-4 mt-2 grid grid-cols-3 rounded-xl border">
         <QuickToggle
-          label="Firewall"
+          label="Kill switch"
           sub={settings.firewall === "always" ? "Always on" : settings.firewall === "auto" ? (status.firewall_active ? "Blocking leaks" : "Automatic") : "Off"}
           checked={settings.firewall !== "off"}
           onChange={(on) => changeSettings({ ...settings, firewall: on ? "auto" : "off" })}
