@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev minisign
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -79,11 +79,17 @@ jobs:
             (cd out && sha256sum * > SHA256SUMS)
             exit 0
           fi
+          # Ubuntu 22.04 doesn't package minisign; use the official build.
+          url=https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          curl -fsSL "$url" -o "$RUNNER_TEMP/minisign.tar.gz"
+          echo "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  $RUNNER_TEMP/minisign.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP" minisign-linux/x86_64/minisign
+          minisign="$RUNNER_TEMP/minisign-linux/x86_64/minisign"
           umask 077
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
-          minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$deb" -t "tunnel $VERSION"
+          "$minisign" -S -s "$RUNNER_TEMP/minisign.key" -m "$deb" -t "tunnel $VERSION"
           rm -f "$RUNNER_TEMP/minisign.key"
-          minisign -V -p packaging/update-key.pub -m "$deb"
+          "$minisign" -V -p packaging/update-key.pub -m "$deb"
           (cd out && sha256sum * > SHA256SUMS)
 
       - name: Publish
