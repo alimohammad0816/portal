@@ -145,9 +145,11 @@ To publish a version:
 scripts/release.sh 0.2.0
 ```
 
-One-time setup: add the contents of the minisign secret key
-(`~/.config/tunnel-release/minisign.key`) as a repository secret named
-`MINISIGN_SECRET_KEY`. Keep that file safe: losing it means installed apps
+To let installed apps update themselves, add the contents of the minisign
+secret key (`~/.config/tunnel-release/minisign.key`) as a repository secret
+named `MINISIGN_SECRET_KEY`. Without it, releases are still built and can be
+downloaded and installed by hand, but they're unsigned and the in-app
+updater skips them. Keep that file safe: losing it means installed apps
 can't verify new releases, and anyone who has it can ship updates.
 
 ## Firewall and DNS

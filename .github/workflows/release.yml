@@ -67,15 +67,18 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if [ -z "$MINISIGN_SECRET_KEY" ]; then
-            echo "::error::Add the MINISIGN_SECRET_KEY repository secret (see README, Releases)."
-            exit 1
-          fi
           mkdir -p out
           src=$(ls target/release/bundle/deb/*.deb | head -1)
           deb="out/tunnel_${VERSION}_amd64.deb"
           cp "$src" "$deb"
           dpkg-deb --field "$deb" Package Version Depends
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            # Still downloadable and installable by hand; installed apps
+            # only offer signed releases, so this one won't auto-update.
+            echo "::warning::No MINISIGN_SECRET_KEY secret: publishing an unsigned package that the in-app updater will skip (see README, Releases)."
+            (cd out && sha256sum * > SHA256SUMS)
+            exit 0
+          fi
           umask 077
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
           minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$deb" -t "tunnel $VERSION"
