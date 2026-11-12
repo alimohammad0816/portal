@@ -1,4 +1,4 @@
-# Tunnel
+# Portal
 
 An OpenVPN client for Linux with the conveniences of commercial VPN apps:
 import your own `.ovpn` profiles, switch locations in one click, and (next
@@ -7,26 +7,26 @@ phase) split tunneling and a kill switch that apply without reconnecting.
 ## Layout
 
 ```
-crates/tunnel-core    shared types, D-Bus contract, .ovpn parser and sanitizer
-crates/tunneld        privileged daemon: runs OpenVPN, exposes org.tunnelvpn.Daemon1
-crates/tunnel-cli     `tunnel` command-line client
+crates/portal-core    shared types, D-Bus contract, .ovpn parser and sanitizer
+crates/portald        privileged daemon: runs OpenVPN, exposes io.github.alimohammad0816.Portal.Daemon1
+crates/portal-cli     `portal` command-line client
 apps/desktop          Tauri 2 + React + shadcn/ui desktop app (src-tauri is the Rust side)
 packaging             systemd unit, D-Bus policy, polkit actions
 scripts               dev install script
 ```
 
 ```
-desktop app / tunnel CLI  ──D-Bus (polkit)──►  tunneld (root, systemd)
+desktop app / portal CLI  ──D-Bus (polkit)──►  portald (root, systemd)
                                                  └─ openvpn  ◄─ management socket
 ```
 
-The GUI never runs as root. `tunneld` drives `openvpn` over its management
+The GUI never runs as root. `portald` drives `openvpn` over its management
 socket (state, traffic counters, credential prompts, logs) and broadcasts
 `StatusChanged` / `LogLine` signals.
 
 ### Profile security
 
-`tunneld` runs OpenVPN as root, so an imported profile could otherwise run
+`portald` runs OpenVPN as root, so an imported profile could otherwise run
 code as root. Imports are sanitized: script hooks (`up`, `down`,
 `script-security`, `plugin`, ...), management and logging directives, and
 anything that reads or writes an arbitrary path are rejected. Keys and
@@ -56,7 +56,7 @@ can rename it, group it, set its country, turn off data channel offload
 
 To reach servers from networks that only let web traffic out, set a
 connection proxy (HTTP or SOCKS5, optionally with a password) in
-Settings › Network, or `tunnel settings proxy=http://proxy.lan:3128
+Settings › Network, or `portal settings proxy=http://proxy.lan:3128
 proxy-auth=on`. It replaces any proxy the profile names.
 
 ## Development
@@ -82,11 +82,11 @@ cargo test --workspace
 Run a simulated daemon on your session bus and point the app at it:
 
 ```bash
-cargo run -p tunneld -- --session --mock
+cargo run -p portald -- --session --mock
 ```
 
 ```bash
-cd apps/desktop && pnpm install && TUNNEL_SESSION_BUS=1 pnpm tauri dev
+cd apps/desktop && pnpm install && PORTAL_SESSION_BUS=1 pnpm tauri dev
 ```
 
 Opening `pnpm dev` in a plain browser also works: the UI falls back to
@@ -108,23 +108,23 @@ cd apps/desktop && pnpm tauri dev
 CLI:
 
 ```bash
-tunnel import ~/Downloads/de-fra.ovpn
+portal import ~/Downloads/de-fra.ovpn
 ```
 
 ```bash
-tunnel connect de-fra
+portal connect de-fra
 ```
 
 ## Install
 
-Download `tunnel_X.Y.Z_amd64.deb` from the latest release, then:
+Download `portal_X.Y.Z_amd64.deb` from the latest release, then:
 
 ```bash
-sudo apt install ./tunnel_X.Y.Z_amd64.deb
+sudo apt install ./portal_X.Y.Z_amd64.deb
 ```
 
-The package contains the app, the `tunnel` CLI and the `tunneld` service,
-which starts right away. `sudo apt purge tunnel` removes everything,
+The package contains the app, the `portal` CLI and the `portald` service,
+which starts right away. `sudo apt purge portal` removes everything,
 including saved profiles.
 
 ## Releases and updates
@@ -133,9 +133,9 @@ including saved profiles.
 `.deb`, signs it with minisign, and publishes it with `SHA256SUMS` as a
 GitHub release. The app checks the latest release every few hours (it can
 be turned off under Settings › About), shows an **Update** button, downloads
-the package as the user, and passes it to `tunneld`. The service installs it
+the package as the user, and passes it to `portald`. The service installs it
 only when it is signed with the release key in
-`packaging/update-key.pub`, is named `tunnel`, and is newer than what's
+`packaging/update-key.pub`, is named `portal`, and is newer than what's
 installed. The install runs in its own systemd unit, so it survives the
 service restarting itself.
 
@@ -154,9 +154,9 @@ can't verify new releases, and anyone who has it can ship updates.
 
 ## Firewall and DNS
 
-The kill switch is one nftables table, `inet tunnelvpn`, owned by `tunneld`
+The kill switch is one nftables table, `inet portal`, owned by `portald`
 and replaced atomically on every change. While it's active, outgoing
-traffic may only use the tunnel interface (`tunnel0`), loopback, DHCP and
+traffic may only use the tunnel interface (`portal0`), loopback, DHCP and
 neighbor discovery, the LAN (if allowed), and the daemon's own cgroup (so
 OpenVPN can reach the server). While connecting, systemd-resolved may also
 resolve the server's name.
@@ -176,7 +176,7 @@ IPv6 outside the tunnel can be blocked separately for IPv4-only VPNs.
 From the CLI:
 
 ```bash
-tunnel settings firewall=always lan=off dns=1.1.1.1,9.9.9.9
+portal settings firewall=always lan=off dns=1.1.1.1,9.9.9.9
 ```
 
 ## Split tunneling
@@ -186,9 +186,9 @@ Pick apps, domains, IPs/networks and whole countries, then either
 **only** for them. Rule changes apply to the running connection; switching
 between the two modes reconnects.
 
-How it works (`crates/tunneld/src/split`):
+How it works (`crates/portald/src/split`):
 
-- An nftables table, `inet tunnelsplit`, marks split packets in a
+- An nftables table, `inet portalsplit`, marks split packets in a
   `route` chain (so the kernel re-routes them) and masquerades them, since
   sockets pick their source address before the mark is set. Connection
   tracking keeps a flow on the side it started on.
@@ -201,24 +201,24 @@ How it works (`crates/tunneld/src/split`):
   answer with nearby servers) and their addresses go into an nft set with a
   timeout before the answer is returned.
 - Apps: processes are found by executable once a second and moved into the
-  `/sys/fs/cgroup/tunnel-split` cgroup, which the rules match.
-  `tunnel bypass -- <command>` starts anything in it directly.
+  `/sys/fs/cgroup/portal-split` cgroup, which the rules match.
+  `portal bypass -- <command>` starts anything in it directly.
 - Countries: RIR delegation lists (ipverse, ipdeny as a fallback), cached in
-  `/var/cache/tunneld/geoip` and refreshed weekly.
+  `/var/cache/portald/geoip` and refreshed weekly.
 
 ```bash
-tunnel split add '*.ir' country:IR /usr/bin/telegram-desktop
+portal split add '*.ir' country:IR /usr/bin/telegram-desktop
 ```
 
 ```bash
-tunnel split on
+portal split on
 ```
 
 The routing tests run against the real kernel in a throwaway network
 namespace:
 
 ```bash
-cargo test -p tunneld --no-run && unshare -rn target/debug/deps/tunneld-* --ignored --test-threads=1 netns
+cargo test -p portald --no-run && unshare -rn target/debug/deps/portald-* --ignored --test-threads=1 netns
 ```
 
 ## Everyday conveniences
@@ -228,7 +228,7 @@ cargo test -p tunneld --no-run && unshare -rn target/debug/deps/tunneld-* --igno
   service; they never reach the web view. A password the server rejects is
   forgotten, so the next attempt asks again.
 - **Start at login, connect on start, connect on untrusted networks.**
-  Tunnel watches NetworkManager's primary connection; joining a network
+  Portal watches NetworkManager's primary connection; joining a network
   that isn't on your trusted list connects the last (or chosen) location.
   Profiles with one-time codes still ask.
 - **Exit location on the map**, from ipwho.is through the tunnel (can be
@@ -236,12 +236,12 @@ cargo test -p tunneld --no-run && unshare -rn target/debug/deps/tunneld-* --igno
 - **Proxy gateway**: one port on your LAN address speaking SOCKS5 and HTTP,
   so phones and TVs can use the VPN. It only runs while connected and only
   serves private addresses.
-- **GNOME quick settings tile** (`tunnel@tunnelvpn.org`, installed with the
+- **GNOME quick settings tile** (`portal@alimohammad0816.github.io`, installed with the
   package): status, recent locations, firewall and split toggles. Turn it
   on in the Extensions app, or:
 
 ```bash
-gnome-extensions enable tunnel@tunnelvpn.org
+gnome-extensions enable portal@alimohammad0816.github.io
 ```
 
 ## Roadmap

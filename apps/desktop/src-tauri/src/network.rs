@@ -1,4 +1,4 @@
-//! Which network we're on, from NetworkManager, so Tunnel can connect by
+//! Which network we're on, from NetworkManager, so Portal can connect by
 //! itself on networks you haven't marked as trusted.
 
 use futures_util::StreamExt;
@@ -77,7 +77,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    /// Reads the real NetworkManager state: `cargo test -p tunnel-desktop -- --ignored network`.
+    /// Reads the real NetworkManager state: `cargo test -p portal-desktop -- --ignored network`.
     #[tokio::test]
     #[ignore]
     async fn network_reads_primary_connection() {

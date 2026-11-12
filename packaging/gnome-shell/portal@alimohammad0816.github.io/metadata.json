@@ -1,0 +1,6 @@
+{
+  "uuid": "portal@alimohammad0816.github.io",
+  "name": "Portal VPN",
+  "description": "Quick settings tile for the Portal VPN client: connect, switch locations, and toggle the firewall and split tunneling.",
+  "shell-version": ["46", "47", "48", "49", "50"]
+}

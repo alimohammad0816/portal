@@ -1,4 +1,4 @@
-//! Desktop shell: bridges the web UI to `tunneld` over D-Bus, owns the tray
+//! Desktop shell: bridges the web UI to `portald` over D-Bus, owns the tray
 //! icon, and keeps running in the tray when the window is closed.
 
 mod apps;
@@ -12,18 +12,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use portal_core::ovpn;
+use portal_core::{ConnState, DaemonProxy, Profile, ProfileEdit, Secrets, Settings, Status};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
 use tokio::sync::Mutex;
-use tunnel_core::ovpn;
-use tunnel_core::{ConnState, DaemonProxy, Profile, ProfileEdit, Secrets, Settings, Status};
 
-/// Which bus the daemon lives on. `TUNNEL_SESSION_BUS=1` selects the
-/// session bus, for running against `tunneld --session --mock`.
+/// Which bus the daemon lives on. `PORTAL_SESSION_BUS=1` selects the
+/// session bus, for running against `portald --session --mock`.
 fn use_session_bus() -> bool {
-    std::env::var("TUNNEL_SESSION_BUS").is_ok_and(|v| !v.is_empty() && v != "0")
+    std::env::var("PORTAL_SESSION_BUS").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 #[derive(Default)]
@@ -54,14 +54,14 @@ fn err(e: zbus::Error) -> String {
     match e {
         zbus::Error::MethodError(name, msg, _) => match (name.as_str(), msg) {
             ("org.freedesktop.DBus.Error.ServiceUnknown", _) => {
-                "The Tunnel service isn't running.".into()
+                "The Portal service isn't running.".into()
             }
             ("org.freedesktop.DBus.Error.AccessDenied", Some(m)) => format!("Not allowed: {m}"),
             (_, Some(m)) => m,
             (n, None) => n.to_string(),
         },
         zbus::Error::FDO(e) => match *e {
-            zbus::fdo::Error::ServiceUnknown(_) => "The Tunnel service isn't running.".into(),
+            zbus::fdo::Error::ServiceUnknown(_) => "The Portal service isn't running.".into(),
             zbus::fdo::Error::Failed(m) => m,
             other => other.to_string(),
         },
@@ -481,6 +481,9 @@ fn restart_app(app: AppHandle) {
 struct Tray {
     status: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
+    /// Which icon is showing: 0 off, 1 connected (status arrives every
+    /// second; only swap the image when it changes).
+    lit: std::sync::atomic::AtomicU8,
 }
 
 // ------------------------------------------------- automatic connections --
@@ -530,10 +533,10 @@ async fn auto_connect(app: &AppHandle, profile: Option<String>, why: &str) {
         .unwrap_or_default();
     let secrets = secrets_for(&p.id, &p.name, ConnectInput::default(), None).await;
     let complete = match p.auth {
-        tunnel_core::AuthKind::Certificate => true,
-        tunnel_core::AuthKind::UserPass => !secrets.username.is_empty(),
+        portal_core::AuthKind::Certificate => true,
+        portal_core::AuthKind::UserPass => !secrets.username.is_empty(),
         // A one-time code can't be automated.
-        tunnel_core::AuthKind::UserPassChallenge => false,
+        portal_core::AuthKind::UserPassChallenge => false,
     } && (!p.key_encrypted || secrets.key_passphrase.is_some())
         && (!(settings.connection_proxy.active() && settings.connection_proxy.auth)
             || secrets.proxy_username.is_some());
@@ -546,7 +549,7 @@ async fn auto_connect(app: &AppHandle, profile: Option<String>, why: &str) {
     if result.is_err() {
         show_main(app);
         let _ = app.emit(
-            "tunnel://needs-credentials",
+            "portal://needs-credentials",
             NeedsCredentials {
                 profile_id: p.id.clone(),
             },
@@ -572,7 +575,7 @@ async fn watch_networks(app: AppHandle) {
     network::watch(|net| {
         let app = app.clone();
         async move {
-            let _ = app.emit("tunnel://network", net.clone());
+            let _ = app.emit("portal://network", net.clone());
             let p = prefs::load();
             if let Some(n) = net
                 && p.auto_connect_untrusted
@@ -628,7 +631,7 @@ fn yes() -> bool {
 async fn exit_info() -> Result<ExitInfo, String> {
     let r: ExitResp = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
-        .user_agent(concat!("Tunnel/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Portal/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?
         .get("https://ipwho.is/?fields=success,ip,country_code,city,latitude,longitude")
@@ -662,7 +665,7 @@ fn show_main(app: &AppHandle) {
 fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
     let status = MenuItem::with_id(app, "status", "Not connected", false, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Connect", true, None::<&str>)?;
-    let show = MenuItem::with_id(app, "show", "Show Tunnel", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show Portal", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -676,7 +679,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
         ],
     )?;
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("Tunnel")
+        .tooltip("Portal")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -713,11 +716,25 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
                 show_main(tray.app_handle());
             }
         });
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
+    if let Ok(icon) = tray_image(false) {
+        builder = builder.icon(icon);
     }
     builder.build(app)?;
-    Ok(Tray { status, toggle })
+    Ok(Tray {
+        status,
+        toggle,
+        lit: std::sync::atomic::AtomicU8::new(0),
+    })
+}
+
+/// The panel icon: the Portal mark without its tile, bright with a green
+/// light while connected, faded otherwise.
+fn tray_image(connected: bool) -> tauri::Result<tauri::image::Image<'static>> {
+    tauri::image::Image::from_bytes(if connected {
+        include_bytes!("../icons/tray-on.png")
+    } else {
+        include_bytes!("../icons/tray-off.png")
+    })
 }
 
 fn update_tray(app: &AppHandle, s: &Status, profile_name: Option<&str>) {
@@ -739,7 +756,16 @@ fn update_tray(app: &AppHandle, s: &Status, profile_name: Option<&str>) {
     let _ = tray.status.set_text(&text);
     let _ = tray.toggle.set_text(action);
     if let Some(icon) = app.tray_by_id("main") {
-        let _ = icon.set_tooltip(Some(format!("Tunnel · {text}")));
+        let _ = icon.set_tooltip(Some(format!("Portal · {text}")));
+        let connected = s.state == ConnState::Connected;
+        let was = tray
+            .lit
+            .swap(u8::from(connected), std::sync::atomic::Ordering::Relaxed);
+        if was != u8::from(connected)
+            && let Ok(image) = tray_image(connected)
+        {
+            let _ = icon.set_icon(Some(image));
+        }
     }
 }
 
@@ -761,7 +787,7 @@ async fn pump_events(app: AppHandle) {
             let initial: Status = parse(d.get_status().await.map_err(err)?)?;
             if last_reachable != Some(true) {
                 last_reachable = Some(true);
-                let _ = app.emit("tunnel://daemon", DaemonInfo { bus: bus_name(), reachable: true, error: None });
+                let _ = app.emit("portal://daemon", DaemonInfo { bus: bus_name(), reachable: true, error: None });
             }
             let mut names = profile_names(&d).await;
             update_tray(&app, &initial, initial.profile_id.as_ref().and_then(|id| names.get(id)).map(String::as_str));
@@ -795,25 +821,25 @@ async fn pump_events(app: AppHandle) {
                             show_main(&app);
                         }
                         asked = asking;
-                        let _ = app.emit("tunnel://status", s);
+                        let _ = app.emit("portal://status", s);
                     }
                     Some(sig) = settings.next() => {
                         if let Ok(args) = sig.args()
                             && let Ok(st) = serde_json::from_str::<Settings>(args.settings())
                         {
-                            let _ = app.emit("tunnel://settings", st);
+                            let _ = app.emit("portal://settings", st);
                         }
                     }
                     Some(sig) = log.next() => {
                         if let Ok(args) = sig.args() {
-                            let _ = app.emit("tunnel://log", args.line().to_string());
+                            let _ = app.emit("portal://log", args.line().to_string());
                         }
                     }
                     Some(new_owner) = owner.next() => {
                         if new_owner.is_none() {
-                            return Err("The Tunnel service stopped.".to_string());
+                            return Err("The Portal service stopped.".to_string());
                         }
-                        let _ = app.emit("tunnel://daemon", DaemonInfo { bus: bus_name(), reachable: true, error: None });
+                        let _ = app.emit("portal://daemon", DaemonInfo { bus: bus_name(), reachable: true, error: None });
                     }
                     else => return Err("Lost the D-Bus connection.".to_string()),
                 }
@@ -825,7 +851,7 @@ async fn pump_events(app: AppHandle) {
             if last_reachable != Some(false) {
                 last_reachable = Some(false);
                 let _ = app.emit(
-                    "tunnel://daemon",
+                    "portal://daemon",
                     DaemonInfo {
                         bus: bus_name(),
                         reachable: false,
@@ -931,7 +957,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running Tunnel");
+        .expect("error while running Portal");
 }
 
 #[cfg(test)]
@@ -952,7 +978,7 @@ mod tests {
 
     #[test]
     fn finds_profiles_in_folders() {
-        let dir = std::env::temp_dir().join(format!("tunnel-scan-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("portal-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mk = |rel: &str, text: &str| {
             let p = dir.join(rel);
@@ -977,12 +1003,12 @@ mod tests {
     #[test]
     fn parses_connect_args() {
         let a = |v: &[&str]| connect_arg(v.iter().map(|s| s.to_string()));
-        assert_eq!(a(&["tunnel-desktop"]), None);
-        assert_eq!(a(&["tunnel-desktop", "--connect"]), Some(None));
+        assert_eq!(a(&["portal-desktop"]), None);
+        assert_eq!(a(&["portal-desktop", "--connect"]), Some(None));
         assert_eq!(
-            a(&["tunnel-desktop", "--connect", "abc"]),
+            a(&["portal-desktop", "--connect", "abc"]),
             Some(Some("abc".into()))
         );
-        assert_eq!(a(&["tunnel-desktop", "--connect", "--hidden"]), Some(None));
+        assert_eq!(a(&["portal-desktop", "--connect", "--hidden"]), Some(None));
     }
 }

@@ -14,7 +14,7 @@ use zbus::{Connection, Proxy};
 const SERVICE: &str = "org.freedesktop.secrets";
 const PATH: &str = "/org/freedesktop/secrets";
 const DEFAULT_COLLECTION: &str = "/org/freedesktop/secrets/aliases/default";
-const APP: &str = "org.tunnelvpn.Tunnel";
+const APP: &str = "io.github.alimohammad0816.Portal";
 
 /// Keyring entries: a profile's sign-in, its private key passphrase, and
 /// the connection proxy's sign-in (shared by all profiles).
@@ -121,7 +121,7 @@ pub async fn save(profile: &str, profile_name: &str, saved: &Saved) -> zbus::Res
     let collection: OwnedObjectPath = ObjectPath::try_from(DEFAULT_COLLECTION)?.into();
     unlock(&conn, &svc, vec![collection.clone()]).await?;
     let session = open_session(&svc).await?;
-    let label = format!("Tunnel VPN: {profile_name}");
+    let label = format!("Portal VPN: {profile_name}");
     let props: HashMap<&str, Value> = HashMap::from([
         ("org.freedesktop.Secret.Item.Label", Value::from(label)),
         (
@@ -174,7 +174,7 @@ mod tests {
     use super::*;
 
     /// Round trip against the real keyring of the session running the
-    /// tests: `cargo test -p tunnel-desktop -- --ignored keyring`.
+    /// tests: `cargo test -p portal-desktop -- --ignored keyring`.
     #[tokio::test]
     #[ignore]
     async fn keyring_round_trip() {

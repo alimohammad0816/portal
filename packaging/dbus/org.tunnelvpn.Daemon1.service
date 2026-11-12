@@ -1,7 +1,0 @@
-# Installed to /usr/share/dbus-1/system-services/ so the daemon starts on
-# first use even when the systemd unit isn't enabled.
-[D-BUS Service]
-Name=org.tunnelvpn.Daemon1
-Exec=/bin/false
-User=root
-SystemdService=dbus-org.tunnelvpn.Daemon1.service

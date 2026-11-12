@@ -48,13 +48,13 @@ export function GeneralSettings({
       <Row
         id="pref-login"
         title="Start at login"
-        description="Tunnel waits in the tray, ready to connect."
+        description="Portal waits in the tray, ready to connect."
         checked={prefs.launch_at_login}
         onChange={(v) => set({ launch_at_login: v })}
       />
       <Row
         id="pref-launch"
-        title="Connect when Tunnel starts"
+        title="Connect when Portal starts"
         description="Uses saved passwords; profiles with one-time codes still ask."
         checked={prefs.connect_on_launch}
         onChange={(v) => set({ connect_on_launch: v })}

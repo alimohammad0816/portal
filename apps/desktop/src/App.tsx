@@ -9,7 +9,6 @@ import {
   Power,
   RotateCw,
   Search,
-  Shield,
   ShieldAlert,
   SlidersHorizontal,
   X,
@@ -18,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type Ask, CredentialsDialog, type CredentialsRequest, noAsk } from "@/components/CredentialsDialog";
 import { ImportMenu } from "@/components/ImportMenu";
+import { Logo } from "@/components/Logo";
 import { type Latency, LocationList } from "@/components/LocationList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sparkline } from "@/components/Sparkline";
@@ -56,8 +56,8 @@ import { countryLocation, homeLocation } from "@/lib/geo";
 import { cn } from "@/lib/utils";
 
 type ListTab = "all" | "favorites" | "recent";
-const FAV_KEY = "tunnel.favorites";
-const AUTO_UPDATE_KEY = "tunnel.autoUpdate";
+const FAV_KEY = "portal.favorites";
+const AUTO_UPDATE_KEY = "portal.autoUpdate";
 const HISTORY = 30;
 
 function readPref(key: string, fallback: boolean): boolean {
@@ -496,11 +496,9 @@ export function App() {
       {/* Title bar */}
       <header data-tauri-drag-region className="flex h-[52px] shrink-0 items-center justify-between pr-2.5 pl-4">
         <div data-tauri-drag-region className="flex items-center gap-2.5">
-          <div className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <Shield className="size-3.5" strokeWidth={2.4} />
-          </div>
+          <Logo className="size-6" />
           <span data-tauri-drag-region className="text-sm font-semibold tracking-tight">
-            Tunnel
+            Portal
           </span>
         </div>
         <div className="flex items-center gap-0.5">
@@ -855,13 +853,13 @@ function DaemonDown({ info, onRetry }: { info: DaemonInfo; onRetry: () => void }
   return (
     <div className="mx-2 mt-3 grid gap-3 rounded-xl border px-4 py-4">
       <div className="grid gap-1">
-        <span className="text-sm font-medium">Can't reach the Tunnel service</span>
+        <span className="text-sm font-medium">Can't reach the Portal service</span>
         <span className="text-xs text-muted-foreground">
-          The app talks to <span className="font-mono">tunneld</span> on the {info.bus} bus. Start it, then retry.
+          The app talks to <span className="font-mono">portald</span> on the {info.bus} bus. Start it, then retry.
         </span>
       </div>
       <code className="selectable rounded-md bg-subtle px-3 py-2 font-mono text-[12px] text-zinc-300">
-        {info.bus === "system" ? "sudo systemctl start tunneld" : "cargo run -p tunneld -- --session --mock"}
+        {info.bus === "system" ? "sudo systemctl start portald" : "cargo run -p portald -- --session --mock"}
       </code>
       {info.error && <span className="selectable font-mono text-[12px] text-dim">{info.error}</span>}
       <Button variant="outline" size="sm" className="justify-self-start" onClick={onRetry}>

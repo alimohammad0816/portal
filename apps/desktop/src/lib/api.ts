@@ -67,27 +67,27 @@ export const api = {
 };
 
 export function onStatus(cb: (s: Status) => void): Promise<UnlistenFn> {
-  return listen<Status>("tunnel://status", (e) => cb(e.payload));
+  return listen<Status>("portal://status", (e) => cb(e.payload));
 }
 
 export function onLog(cb: (line: string) => void): Promise<UnlistenFn> {
-  return listen<string>("tunnel://log", (e) => cb(e.payload));
+  return listen<string>("portal://log", (e) => cb(e.payload));
 }
 
 export function onSettings(cb: (s: Settings) => void): Promise<UnlistenFn> {
-  return listen<Settings>("tunnel://settings", (e) => cb(e.payload));
+  return listen<Settings>("portal://settings", (e) => cb(e.payload));
 }
 
 export function onNetwork(cb: (n: Network | null) => void): Promise<UnlistenFn> {
-  return listen<Network | null>("tunnel://network", (e) => cb(e.payload));
+  return listen<Network | null>("portal://network", (e) => cb(e.payload));
 }
 
 export function onNeedsCredentials(cb: (profileId: string) => void): Promise<UnlistenFn> {
-  return listen<{ profile_id: string }>("tunnel://needs-credentials", (e) => cb(e.payload.profile_id));
+  return listen<{ profile_id: string }>("portal://needs-credentials", (e) => cb(e.payload.profile_id));
 }
 
 export function onDaemon(cb: (info: DaemonInfo) => void): Promise<UnlistenFn> {
-  return listen<DaemonInfo>("tunnel://daemon", (e) => cb(e.payload));
+  return listen<DaemonInfo>("portal://daemon", (e) => cb(e.payload));
 }
 
 export function errorText(e: unknown): string {

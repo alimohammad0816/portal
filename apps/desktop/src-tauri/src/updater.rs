@@ -1,14 +1,14 @@
 //! Update checks against GitHub Releases. Downloads happen here, as the
 //! user; the daemon verifies the signature and installs (see
-//! `tunneld::update`).
+//! `portald::update`).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use portal_core::names::UPDATE_REPO;
 use serde::{Deserialize, Serialize};
-use tunnel_core::names::UPDATE_REPO;
 
-const USER_AGENT: &str = concat!("Tunnel/", env!("CARGO_PKG_VERSION"), " (update check)");
+const USER_AGENT: &str = concat!("Portal/", env!("CARGO_PKG_VERSION"), " (update check)");
 
 #[derive(Serialize, Clone)]
 pub struct UpdateInfo {
@@ -182,11 +182,11 @@ pub async fn download(rel: &Release) -> Result<(PathBuf, String), String> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir)
-        .join("tunnel");
+        .join("portal");
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| e.to_string())?;
-    let path = dir.join(format!("tunnel_{}.deb", rel.version));
+    let path = dir.join(format!("portal_{}.deb", rel.version));
     tokio::fs::write(&path, &bytes)
         .await
         .map_err(|e| e.to_string())?;

@@ -40,7 +40,7 @@ export function UpdateDialog({
     <Dialog open={open && release !== null} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Tunnel {release?.version} is available</DialogTitle>
+          <DialogTitle>Portal {release?.version} is available</DialogTitle>
           <DialogDescription>
             You have {current}. The update is checked against the release signature before it's installed. An active VPN
             connection drops briefly while the service restarts.

@@ -32,7 +32,7 @@ cargo test --workspace --quiet
 
 git add Cargo.toml Cargo.lock apps/desktop/package.json
 git commit -m "Release v$new"
-git tag -a "v$new" -m "Tunnel $new"
+git tag -a "v$new" -m "Portal $new"
 git push origin HEAD "v$new"
 
 echo "Pushed v$new. Follow the build under the repository's Actions tab."

@@ -29,8 +29,8 @@ export interface CredentialsRequest {
 
 export const noAsk: Ask = { login: false, otp: false, key: false, proxy: false };
 
-const userKey = (id: string) => `tunnel.username.${id}`;
-const proxyUserKey = "tunnel.proxy-username";
+const userKey = (id: string) => `portal.username.${id}`;
+const proxyUserKey = "portal.proxy-username";
 
 function stored(key: string): string {
   try {

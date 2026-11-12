@@ -1,0 +1,21 @@
+[package]
+name = "portal-cli"
+description = "Command-line client for the Portal VPN daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "portal"
+path = "src/main.rs"
+
+[dependencies]
+portal-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+rpassword = "7.5"

@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       # Baked into the app so it knows where to look for updates.
-      TUNNEL_UPDATE_REPO: ${{ github.repository }}
+      PORTAL_UPDATE_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v5
 
@@ -54,7 +54,7 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build daemon and CLI
-        run: cargo build --release --locked -p tunneld -p tunnel-cli
+        run: cargo build --release --locked -p portald -p portal-cli
 
       - name: Build app and .deb
         working-directory: apps/desktop
@@ -69,7 +69,7 @@ jobs:
         run: |
           mkdir -p out
           src=$(ls target/release/bundle/deb/*.deb | head -1)
-          deb="out/tunnel_${VERSION}_amd64.deb"
+          deb="out/portal_${VERSION}_amd64.deb"
           cp "$src" "$deb"
           dpkg-deb --field "$deb" Package Version Depends
           if [ -z "$MINISIGN_SECRET_KEY" ]; then
@@ -87,7 +87,7 @@ jobs:
           minisign="$RUNNER_TEMP/minisign-linux/x86_64/minisign"
           umask 077
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
-          "$minisign" -S -s "$RUNNER_TEMP/minisign.key" -m "$deb" -t "tunnel $VERSION"
+          "$minisign" -S -s "$RUNNER_TEMP/minisign.key" -m "$deb" -t "portal $VERSION"
           rm -f "$RUNNER_TEMP/minisign.key"
           "$minisign" -V -p packaging/update-key.pub -m "$deb"
           (cd out && sha256sum * > SHA256SUMS)
@@ -95,6 +95,6 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          name: Tunnel ${{ steps.version.outputs.version }}
+          name: Portal ${{ steps.version.outputs.version }}
           generate_release_notes: true
           files: out/*

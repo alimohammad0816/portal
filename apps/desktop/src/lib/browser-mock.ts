@@ -61,12 +61,12 @@ let timers: number[] = [];
 function setStatus(s: Partial<Status>) {
   status = { ...status, ...s };
   status = { ...status, ...firewallFields(status) };
-  emit("tunnel://status", status);
+  emit("portal://status", status);
 }
 
 function addLog(line: string) {
   log.push(line);
-  emit("tunnel://log", line);
+  emit("portal://log", line);
 }
 
 function clearTimers() {
@@ -230,7 +230,7 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
         }
       }
       if (settings.firewall !== "auto") blockedAfterDrop = false;
-      emit("tunnel://settings", settings);
+      emit("portal://settings", settings);
       setStatus({});
       return settings;
     case "simulate_drop":

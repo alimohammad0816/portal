@@ -4,12 +4,12 @@ set -e
 
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload || true
-  # Pick up the D-Bus policy for org.tunnelvpn.Daemon1.
+  # Pick up the D-Bus policy for io.github.alimohammad0816.Portal.Daemon1.
   systemctl reload dbus.service 2>/dev/null || true
-  systemctl enable tunneld.service >/dev/null 2>&1 || true
+  systemctl enable portald.service >/dev/null 2>&1 || true
   # On upgrade this swaps in the new daemon; an active VPN reconnects
   # from the app.
-  systemctl restart tunneld.service || true
+  systemctl restart portald.service || true
 fi
 
 exit 0

@@ -4,11 +4,11 @@ set -e
 
 if [ "$1" = "remove" ]; then
   if [ -d /run/systemd/system ]; then
-    systemctl disable --now tunneld.service >/dev/null 2>&1 || true
+    systemctl disable --now portald.service >/dev/null 2>&1 || true
   fi
   # Don't leave the kill switch behind (it outlives the service in
   # "always" mode).
-  nft delete table inet tunnelvpn >/dev/null 2>&1 || true
+  nft delete table inet portal >/dev/null 2>&1 || true
 fi
 
 exit 0

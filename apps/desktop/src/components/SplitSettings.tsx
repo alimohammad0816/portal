@@ -242,7 +242,7 @@ export function SplitSettings({
             </div>
           )}
           <p className="text-[12px] leading-4 text-dim">
-            Or start any program this way: <span className="selectable font-mono text-muted-foreground">tunnel bypass -- firefox</span>
+            Or start any program this way: <span className="selectable font-mono text-muted-foreground">portal bypass -- firefox</span>
           </p>
         </Section>
 

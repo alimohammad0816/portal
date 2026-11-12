@@ -1,6 +1,0 @@
-{
-  "uuid": "tunnel@tunnelvpn.org",
-  "name": "Tunnel VPN",
-  "description": "Quick settings tile for the Tunnel VPN client: connect, switch locations, and toggle the firewall and split tunneling.",
-  "shell-version": ["46", "47", "48", "49", "50"]
-}

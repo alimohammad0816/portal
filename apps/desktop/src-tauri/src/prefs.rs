@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
-    /// Start Tunnel (in the tray) when you log in.
+    /// Start Portal (in the tray) when you log in.
     pub launch_at_login: bool,
     /// Connect when the app starts.
     pub connect_on_launch: bool,
@@ -45,13 +45,13 @@ fn config_dir() -> PathBuf {
 }
 
 fn prefs_path() -> PathBuf {
-    config_dir().join("tunnel").join("prefs.json")
+    config_dir().join("portal").join("prefs.json")
 }
 
 fn autostart_path() -> PathBuf {
     config_dir()
         .join("autostart")
-        .join("org.tunnelvpn.Tunnel.desktop")
+        .join("io.github.alimohammad0816.Portal.desktop")
 }
 
 pub fn load() -> Prefs {
@@ -82,7 +82,7 @@ fn set_autostart(on: bool) -> Result<(), String> {
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Tunnel\nComment=Start the Tunnel VPN client in the tray\nExec={} --hidden\nIcon=tunnel-desktop\nTerminal=false\nX-GNOME-Autostart-enabled=true\nX-GNOME-Autostart-Delay=2\n",
+        "[Desktop Entry]\nType=Application\nName=Portal\nComment=Start the Portal VPN client in the tray\nExec={} --hidden\nIcon=portal-desktop\nTerminal=false\nX-GNOME-Autostart-enabled=true\nX-GNOME-Autostart-Delay=2\n",
         exe.display()
     );
     if let Some(dir) = path.parent() {

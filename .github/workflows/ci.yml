@@ -55,6 +55,6 @@ jobs:
       - name: Routing and nftables tests in a network namespace
         run: |
           sudo apt-get install -y --no-install-recommends nftables jq
-          bin=$(cargo test -p tunneld --locked --no-run --message-format=json \
-            | jq -r 'select(.profile.test == true and .target.name == "tunneld") | .executable')
+          bin=$(cargo test -p portald --locked --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.name == "portald") | .executable')
           sudo unshare -n "$bin" --ignored --test-threads=1 netns
