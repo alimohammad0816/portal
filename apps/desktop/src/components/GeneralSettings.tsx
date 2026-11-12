@@ -1,4 +1,4 @@
-import { Wifi, X } from "lucide-react";
+import { ChevronDown, Wifi, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -21,7 +21,7 @@ function Row({
   return (
     <div className="flex items-center justify-between gap-4">
       <Label htmlFor={id} className="grid gap-1 font-normal">
-        <span className="text-[13px] font-medium">{title}</span>
+        <span className="text-[13.5px] font-medium">{title}</span>
         <span className="text-xs leading-5 text-muted-foreground">{description}</span>
       </Label>
       <Switch id={id} checked={checked} onCheckedChange={onChange} />
@@ -68,28 +68,33 @@ export function GeneralSettings({
       />
 
       <div className="grid gap-2">
-        <Label htmlFor="pref-profile" className="text-[13px]">
+        <Label htmlFor="pref-profile" className="text-[13.5px]">
           Location for automatic connections
         </Label>
-        <select
-          id="pref-profile"
-          value={prefs.auto_profile ?? ""}
-          onChange={(e) => set({ auto_profile: e.target.value || null })}
-          className="h-8 rounded-md border bg-background px-2 text-[13px]"
-        >
-          <option value="">Last used</option>
-          {profiles.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
+        <div className="relative">
+          <select
+            id="pref-profile"
+            value={prefs.auto_profile ?? ""}
+            onChange={(e) => set({ auto_profile: e.target.value || null })}
+            className="h-8 w-full cursor-pointer appearance-none rounded-md border bg-background pr-8 pl-2.5 text-[13.5px] text-foreground outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          >
+            <option value="" className="bg-popover text-popover-foreground">
+              Last used
             </option>
-          ))}
-        </select>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id} className="bg-popover text-popover-foreground">
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+        </div>
       </div>
 
       <div className="grid gap-2 rounded-xl border p-3">
         <div className="flex items-start justify-between gap-3">
           <div className="grid gap-0.5">
-            <span className="text-[13px] font-semibold">Trusted networks</span>
+            <span className="text-[13.5px] font-semibold">Trusted networks</span>
             <span className="text-xs text-muted-foreground">No automatic connection on these.</span>
           </div>
           {network && !trusted && (
@@ -108,7 +113,7 @@ export function GeneralSettings({
           prefs.trusted_networks.map((n) => (
             <div key={n} className="flex items-center gap-2">
               <Wifi className="size-3.5 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate text-[13px]">
+              <span className="min-w-0 flex-1 truncate text-[13.5px]">
                 {n}
                 {network?.name === n && <span className="text-xs text-dim"> · current</span>}
               </span>

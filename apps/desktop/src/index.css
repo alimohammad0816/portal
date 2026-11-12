@@ -33,6 +33,12 @@
 @theme inline {
   --font-sans: "Geist Variable", "Geist", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, monospace;
+  /* Small light-on-dark text reads thin and soft at the stock sizes and
+     weights; nudge both (Geist is variable, so 450 is a real weight). */
+  --text-xs: 0.78125rem;
+  --text-xs--line-height: calc(1.15 / 0.78125);
+  --font-weight-normal: 450;
+  --font-weight-medium: 540;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -73,8 +79,13 @@
     background: transparent;
     overflow: hidden;
   }
+  :root {
+    color-scheme: dark;
+  }
   body {
-    @apply text-foreground font-sans antialiased;
+    @apply text-foreground font-sans;
+    font-weight: 450;
+    text-rendering: optimizeLegibility;
     user-select: none;
     -webkit-user-select: none;
   }

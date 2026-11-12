@@ -86,7 +86,7 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
   return (
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 border-b py-3 last:border-0">
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-mono text-[11px] text-dim">
+        <span className="truncate font-mono text-[12px] text-dim">
           {profile.source_file} · {profile.remote_host} · last used {formatAgo(profile.last_connected_at).toLowerCase()}
         </span>
         <Button
@@ -101,8 +101,8 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
         </Button>
       </div>
       <div className="grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_56px] gap-2">
-        <Input aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} className="h-8 text-[13px]" />
-        <Input aria-label="Group" value={group} onChange={(e) => setGroup(e.target.value)} className="h-8 text-[13px]" />
+        <Input aria-label="Name" value={name} onChange={(e) => setName(e.target.value)} className="h-8 text-[13.5px]" />
+        <Input aria-label="Group" value={group} onChange={(e) => setGroup(e.target.value)} className="h-8 text-[13.5px]" />
         <Input
           aria-label="Country code"
           value={country}
@@ -112,7 +112,7 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
             setCountry(e.target.value.toUpperCase());
             setError(null);
           }}
-          className="h-8 text-center font-mono text-[13px]"
+          className="h-8 text-center font-mono text-[13.5px]"
         />
       </div>
       {saved.login && (
@@ -144,13 +144,13 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 rounded-lg border p-3">
           <div className="flex items-center justify-between gap-4">
             <Label htmlFor={`dco-${profile.id}`} className="grid gap-1 font-normal">
-              <span className="text-[13px] font-medium">Data channel offload (DCO)</span>
+              <span className="text-[13.5px] font-medium">Data channel offload (DCO)</span>
               <span className="text-xs leading-5 text-muted-foreground">Faster encryption in the kernel. Turn off if the connection misbehaves.</span>
             </Label>
             <Switch id={`dco-${profile.id}`} checked={dco} onCheckedChange={setDco} />
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor={`extra-${profile.id}`} className="text-[13px] font-medium">
+            <Label htmlFor={`extra-${profile.id}`} className="text-[13.5px] font-medium">
               Extra options
             </Label>
             <textarea
@@ -163,7 +163,7 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
               rows={3}
               spellCheck={false}
               placeholder={"mssfix 1400\ntun-mtu 1500"}
-              className="selectable scroll-subtle min-h-16 w-full min-w-0 resize-y rounded-md border bg-transparent px-3 py-2 font-mono text-[12px] leading-5 outline-none placeholder:text-dim focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="selectable scroll-subtle min-h-16 w-full min-w-0 resize-y rounded-md border bg-transparent px-3 py-2 font-mono text-[12.5px] leading-5 outline-none placeholder:text-dim focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
             />
             <span className="text-xs leading-5 text-muted-foreground">OpenVPN directives, one per line, added after the profile's own.</span>
           </div>
@@ -171,7 +171,7 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
       )}
       {(dirty || error) && (
         <div className="flex items-center justify-between gap-2">
-          <span className="min-w-0 text-[12px] break-words text-destructive">{error}</span>
+          <span className="min-w-0 text-[12.5px] break-words text-destructive">{error}</span>
           {dirty && (
             <Button size="sm" onClick={save}>
               Save
@@ -194,7 +194,7 @@ function LogView({ lines }: { lines: string[] }) {
     <div className="grid gap-2">
       <div
         ref={ref}
-        className="selectable scroll-subtle h-80 overflow-auto rounded-lg border bg-subtle/50 p-3 font-mono text-[11px] leading-5 text-zinc-300"
+        className="selectable scroll-subtle h-80 overflow-auto rounded-lg border bg-subtle/50 p-3 font-mono text-[12px] leading-5 text-zinc-300"
       >
         {lines.length === 0 ? <span className="text-dim">No log lines yet.</span> : lines.map((l, i) => <div key={i}>{l}</div>)}
       </div>
@@ -231,7 +231,7 @@ function AboutView({ u }: { u: UpdateSettings }) {
   const enabled = u.info?.enabled !== false;
   return (
     <div className="grid gap-4 pt-1">
-      <div className="grid grid-cols-2 gap-3 rounded-lg border p-3 text-[13px]">
+      <div className="grid grid-cols-2 gap-3 rounded-lg border p-3 text-[13.5px]">
         <div className="grid gap-0.5">
           <span className="text-xs text-muted-foreground">App</span>
           <span className="font-mono">{u.info?.current ?? "—"}</span>
@@ -243,7 +243,7 @@ function AboutView({ u }: { u: UpdateSettings }) {
       </div>
       <div className="flex items-center justify-between gap-4">
         <Label htmlFor="auto-update" className="grid gap-1 font-normal">
-          <span className="text-[13px] font-medium">Check for updates automatically</span>
+          <span className="text-[13.5px] font-medium">Check for updates automatically</span>
           <span className="text-xs text-muted-foreground">Asks GitHub for new releases at start and every few hours.</span>
         </Label>
         <Switch id="auto-update" checked={u.autoCheck} onCheckedChange={u.onAutoCheckChange} disabled={!enabled} />

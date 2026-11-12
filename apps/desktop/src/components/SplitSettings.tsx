@@ -74,7 +74,7 @@ function AppPicker({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search apps"
             aria-label="Search apps"
-            className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-dim"
+            className="min-w-0 flex-1 bg-transparent text-[13.5px] text-foreground outline-none placeholder:text-dim"
           />
         </label>
         <div className="scroll-subtle -mx-1 h-80 overflow-y-auto px-1">
@@ -93,10 +93,10 @@ function AppPicker({
               >
                 <AppGlyph name={a.name} />
                 <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate text-[13px] font-medium">{a.name}</span>
-                  <span className="truncate font-mono text-[11px] text-dim">{a.path}</span>
+                  <span className="truncate text-[13.5px] font-medium">{a.name}</span>
+                  <span className="truncate font-mono text-[12px] text-dim">{a.path}</span>
                 </span>
-                {added ? <span className="text-[11px] text-muted-foreground">Added</span> : <Plus className="size-3.5 text-muted-foreground" />}
+                {added ? <span className="text-[12px] text-muted-foreground">Added</span> : <Plus className="size-3.5 text-muted-foreground" />}
               </button>
             );
           })}
@@ -108,7 +108,7 @@ function AppPicker({
 
 function AppGlyph({ name }: { name: string }) {
   return (
-    <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-subtle text-[12px] font-semibold">
+    <span className="flex size-7 shrink-0 items-center justify-center rounded-md border bg-subtle text-[12.5px] font-semibold">
       {name.charAt(0).toUpperCase()}
     </span>
   );
@@ -119,7 +119,7 @@ function Section({ title, hint, action, children }: { title: string; hint: strin
     <section className="grid gap-2 rounded-xl border p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="grid gap-0.5">
-          <span className="text-[13px] font-semibold">{title}</span>
+          <span className="text-[13.5px] font-semibold">{title}</span>
           <span className="text-xs text-muted-foreground">{hint}</span>
         </div>
         {action}
@@ -189,7 +189,7 @@ export function SplitSettings({
     <div className="grid gap-3 pt-1">
       <div className="flex items-center justify-between gap-4">
         <Label htmlFor="split-on" className="grid gap-1 font-normal">
-          <span className="text-[13px] font-medium">Split tunneling</span>
+          <span className="text-[13.5px] font-medium">Split tunneling</span>
           <span className="text-xs leading-5 text-muted-foreground">
             {status.split_active
               ? `On${status.split_processes ? ` · ${status.split_processes} processes split` : ""}. Changes apply live.`
@@ -233,15 +233,15 @@ export function SplitSettings({
                 <div key={a.path} className="flex items-center gap-3 rounded-lg py-1">
                   <AppGlyph name={a.name} />
                   <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-[13px] font-medium">{a.name}</span>
-                    <span className="truncate font-mono text-[11px] text-dim">{a.path}</span>
+                    <span className="truncate text-[13.5px] font-medium">{a.name}</span>
+                    <span className="truncate font-mono text-[12px] text-dim">{a.path}</span>
                   </span>
                   <RemoveButton label={`Remove ${a.name}`} onClick={() => set({ apps: split.apps.filter((x) => x.path !== a.path) })} />
                 </div>
               ))}
             </div>
           )}
-          <p className="text-[11px] leading-4 text-dim">
+          <p className="text-[12px] leading-4 text-dim">
             Or start any program this way: <span className="selectable font-mono text-muted-foreground">tunnel bypass -- firefox</span>
           </p>
         </Section>
@@ -268,7 +268,7 @@ export function SplitSettings({
             <div className="grid">
               {split.hosts.map((h) => (
                 <div key={h} className="flex items-center gap-2 py-0.5">
-                  <span className="w-[62px] shrink-0 rounded-md bg-accent py-0.5 text-center text-[10px] font-medium text-zinc-300">
+                  <span className="w-[62px] shrink-0 rounded-md bg-accent py-0.5 text-center text-[11px] font-medium text-zinc-300">
                     {hostKind(h)}
                   </span>
                   <span className="selectable min-w-0 flex-1 truncate font-mono text-xs">{h}</span>
@@ -283,7 +283,7 @@ export function SplitSettings({
           <div className="flex flex-wrap gap-1.5">
             {split.countries.map((c) => (
               <span key={c} className="flex h-7 items-center gap-1.5 rounded-md border pr-1 pl-2 text-xs">
-                <span className="font-mono text-[11px] text-muted-foreground">{c}</span>
+                <span className="font-mono text-[12px] text-muted-foreground">{c}</span>
                 {COUNTRIES[c] ?? ""}
                 <button
                   type="button"
@@ -313,7 +313,7 @@ export function SplitSettings({
           </div>
         </Section>
 
-        <p className="text-[11px] leading-4 text-dim">
+        <p className="text-[12px] leading-4 text-dim">
           Switching between Exclude and Only listed reconnects the VPN. Local network traffic never uses the VPN in
           Only listed mode.
         </p>

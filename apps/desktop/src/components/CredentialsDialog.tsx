@@ -232,13 +232,13 @@ export function CredentialsDialog({
           )}
           {canRemember && (
             <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="cred-remember" className="text-[13px] font-normal">
+              <Label htmlFor="cred-remember" className="text-[13.5px] font-normal">
                 {ask.key && !ask.login && !ask.proxy ? "Remember passphrase" : "Remember in keyring"}
               </Label>
               <Switch id="cred-remember" checked={remember} onCheckedChange={setRemember} />
             </div>
           )}
-          {error && <p className="text-[13px] text-destructive">{error}</p>}
+          {error && <p className="text-[13.5px] text-destructive">{error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onCancel}>
               Cancel

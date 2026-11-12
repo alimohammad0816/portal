@@ -75,12 +75,12 @@ export function LocationList({
                   onClick={() => onPick(p)}
                   className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left outline-none"
                 >
-                  <span className="flex h-5 w-[30px] shrink-0 items-center justify-center rounded-[5px] border font-mono text-[10px] font-medium text-zinc-300">
+                  <span className="flex h-5 w-[30px] shrink-0 items-center justify-center rounded-[5px] border font-mono text-[11px] font-medium text-zinc-300">
                     {p.country ?? "--"}
                   </span>
                   <span className="flex min-w-0 flex-1 flex-col gap-px">
-                    <span className="truncate text-[13px] font-medium">{p.name}</span>
-                    <span className="truncate font-mono text-[11px] text-dim">
+                    <span className="truncate text-[13.5px] font-medium">{p.name}</span>
+                    <span className="truncate font-mono text-[12px] text-dim">
                       {p.proto.toUpperCase()} {p.remote_port} · {p.remote_host}
                     </span>
                   </span>

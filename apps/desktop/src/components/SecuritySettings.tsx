@@ -38,7 +38,7 @@ export function Choice({
         {selected && <span className="size-2 rounded-full bg-foreground" />}
       </span>
       <span className="grid gap-0.5">
-        <span className="text-[13px] font-medium">{title}</span>
+        <span className="text-[13.5px] font-medium">{title}</span>
         <span className="text-xs leading-5 text-muted-foreground">{description}</span>
       </span>
     </button>
@@ -61,7 +61,7 @@ function Toggle({
   return (
     <div className="flex items-center justify-between gap-4">
       <Label htmlFor={id} className="grid gap-1 font-normal">
-        <span className="text-[13px] font-medium">{title}</span>
+        <span className="text-[13.5px] font-medium">{title}</span>
         <span className="text-xs leading-5 text-muted-foreground">{description}</span>
       </Label>
       <Switch id={id} checked={checked} onCheckedChange={onChange} />
@@ -160,7 +160,7 @@ export function ConnectionProxySettings({ settings, onChange }: { settings: Sett
   return (
     <div className="grid gap-3 rounded-xl border p-3">
       <div className="grid gap-1">
-        <span className="text-[13px] font-medium">Connect through a proxy</span>
+        <span className="text-[13.5px] font-medium">Connect through a proxy</span>
         <span className="text-xs leading-5 text-muted-foreground">
           For networks that only let web traffic out. Off uses the profile's own proxy, if it has one.
         </span>
@@ -198,7 +198,7 @@ export function ConnectionProxySettings({ settings, onChange }: { settings: Sett
               }}
               onKeyDown={(e) => e.key === "Enter" && save({ kind: shownKind })}
               onBlur={() => host.trim() && save({ kind: shownKind })}
-              className="h-8 font-mono text-[13px]"
+              className="h-8 font-mono text-[13.5px]"
             />
             <Input
               aria-label="Proxy port"
@@ -210,7 +210,7 @@ export function ConnectionProxySettings({ settings, onChange }: { settings: Sett
               }}
               onKeyDown={(e) => e.key === "Enter" && save({ kind: shownKind })}
               onBlur={() => host.trim() && save({ kind: shownKind })}
-              className="h-8 font-mono text-[13px]"
+              className="h-8 font-mono text-[13.5px]"
             />
           </div>
           <Toggle
@@ -292,7 +292,7 @@ export function GatewaySettings({
           }}
           onKeyDown={(e) => e.key === "Enter" && savePort()}
           onBlur={savePort}
-          className="h-8 w-24 font-mono text-[13px]"
+          className="h-8 w-24 font-mono text-[13.5px]"
         />
         {error && <span className="text-xs text-destructive">{error}</span>}
       </div>
@@ -376,7 +376,7 @@ export function DnsSettings({
               setError(null);
             }}
             onKeyDown={(e) => e.key === "Enter" && saveCustom()}
-            className="h-8 font-mono text-[13px]"
+            className="h-8 font-mono text-[13.5px]"
           />
           <Button size="sm" onClick={saveCustom} disabled={custom && draft === savedCustom}>
             Save

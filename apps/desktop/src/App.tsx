@@ -4,7 +4,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowUpCircle,
-  Download,
   FileUp,
   Loader2,
   Power,
@@ -18,6 +17,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type Ask, CredentialsDialog, type CredentialsRequest, noAsk } from "@/components/CredentialsDialog";
+import { ImportMenu } from "@/components/ImportMenu";
 import { type Latency, LocationList } from "@/components/LocationList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sparkline } from "@/components/Sparkline";
@@ -473,14 +473,22 @@ export function App() {
   const live = status.state === "connected";
   const busy = status.state === "connecting" || status.state === "disconnecting" || status.state === "needs_credentials";
   const statusColor = live ? "text-success" : busy ? "text-warning" : "text-muted-foreground";
+  // OpenVPN lost the server and is trying again (the firewall keeps blocking).
+  const reconnecting = status.state === "connecting" && status.detail === "RECONNECTING";
   const mapLabel =
     live && selected
       ? exit?.city
         ? `${exit.city}${exit.country_code ? `, ${exit.country_code}` : ""}`
         : `${selected.name}${selected.country ? `, ${selected.country}` : ""}`
-      : busy
-        ? "Connecting"
-        : "Unprotected";
+      : status.state === "disconnecting"
+        ? "Disconnecting"
+        : status.state === "needs_credentials"
+          ? "Waiting for you"
+          : busy
+            ? reconnecting
+              ? "Reconnecting"
+              : "Connecting"
+            : "Unprotected";
   const error = notice ?? status.error;
 
   return (
@@ -517,9 +525,7 @@ export function App() {
               Update
             </Button>
           ) : null}
-          <Button variant="ghost" size="icon" aria-label="Import profiles" onClick={pickFiles} className="text-muted-foreground">
-            <Download />
-          </Button>
+          <ImportMenu onFiles={pickFiles} onFolder={pickFolder} />
           <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => openSettings("firewall")} className="text-muted-foreground">
             <SlidersHorizontal />
           </Button>
@@ -549,7 +555,7 @@ export function App() {
       <div className="flex items-end justify-between gap-3 px-4 pt-4">
         <div className="min-w-0">
           <div className={cn("text-xs font-medium", statusColor)}>
-            {STATE_TEXT[status.state]}
+            {reconnecting ? "Reconnecting…" : STATE_TEXT[status.state]}
             {busy && status.detail ? <span className="text-dim"> · {status.detail.toLowerCase().replace("_", " ")}</span> : null}
           </div>
           <div className="mt-0.5 truncate text-2xl font-semibold tracking-[-0.03em]">{selected?.name ?? "No profile"}</div>
@@ -558,7 +564,7 @@ export function App() {
           </div>
         </div>
         <div className="shrink-0 pb-0.5 text-right text-xs text-muted-foreground">
-          <div className="font-mono text-[13px] text-foreground">
+          <div className="font-mono text-[13.5px] text-foreground">
             {live && status.connected_since ? formatDuration(now / 1000 - status.connected_since) : "--:--:--"}
           </div>
           <div>Session</div>
@@ -641,7 +647,7 @@ export function App() {
         <div className="flex min-w-0 flex-col gap-[3px] px-3 py-2.5">
           <span className="text-xs text-muted-foreground">Tunnel IP</span>
           <span className="truncate font-mono text-sm font-medium">{live ? (status.tunnel_ip ?? "—") : "—"}</span>
-          <span className="truncate text-[11px] text-dim">{selected ? `${selected.proto.toUpperCase()} · ${authLabel(selected)}` : ""}</span>
+          <span className="truncate text-[12px] text-dim">{selected ? `${selected.proto.toUpperCase()} · ${authLabel(selected)}` : ""}</span>
         </div>
       </div>
 
@@ -689,7 +695,7 @@ export function App() {
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search"
               aria-label="Search locations"
-              className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-dim"
+              className="min-w-0 flex-1 bg-transparent text-[13.5px] text-foreground outline-none placeholder:text-dim"
             />
           </label>
         </div>
@@ -699,7 +705,7 @@ export function App() {
           ) : profiles.length === 0 ? (
             <EmptyState onImport={pickFiles} onImportFolder={pickFolder} />
           ) : visible.length === 0 ? (
-            <p className="px-3 py-8 text-center text-[13px] text-muted-foreground">
+            <p className="px-3 py-8 text-center text-[13.5px] text-muted-foreground">
               {tab === "favorites" ? "Star a location to keep it here." : tab === "recent" ? "Locations you connect to show up here." : "No locations match your search."}
             </p>
           ) : (
@@ -811,8 +817,8 @@ function QuickToggle({
   return (
     <div className={cn("flex min-w-0 items-center justify-between gap-2 px-3 py-2.5", divider && "border-l")}>
       <button type="button" onClick={onMore} className="min-w-0 cursor-pointer text-left">
-        <div className="text-[13px] font-medium">{label}</div>
-        <div className="truncate text-[11px] text-muted-foreground">{sub}</div>
+        <div className="text-[13.5px] font-medium">{label}</div>
+        <div className="truncate text-[12px] text-muted-foreground">{sub}</div>
       </button>
       <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
     </div>
@@ -854,10 +860,10 @@ function DaemonDown({ info, onRetry }: { info: DaemonInfo; onRetry: () => void }
           The app talks to <span className="font-mono">tunneld</span> on the {info.bus} bus. Start it, then retry.
         </span>
       </div>
-      <code className="selectable rounded-md bg-subtle px-3 py-2 font-mono text-[11px] text-zinc-300">
+      <code className="selectable rounded-md bg-subtle px-3 py-2 font-mono text-[12px] text-zinc-300">
         {info.bus === "system" ? "sudo systemctl start tunneld" : "cargo run -p tunneld -- --session --mock"}
       </code>
-      {info.error && <span className="selectable font-mono text-[11px] text-dim">{info.error}</span>}
+      {info.error && <span className="selectable font-mono text-[12px] text-dim">{info.error}</span>}
       <Button variant="outline" size="sm" className="justify-self-start" onClick={onRetry}>
         Retry
       </Button>

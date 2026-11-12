@@ -47,11 +47,11 @@ export function UpdateDialog({
           </DialogDescription>
         </DialogHeader>
         {release?.notes && (
-          <div className="selectable scroll-subtle max-h-56 overflow-y-auto rounded-lg border bg-subtle/50 px-3 py-2.5 text-[13px] leading-6 whitespace-pre-line text-zinc-300">
+          <div className="selectable scroll-subtle max-h-56 overflow-y-auto rounded-lg border bg-subtle/50 px-3 py-2.5 text-[13.5px] leading-6 whitespace-pre-line text-zinc-300">
             {release.notes}
           </div>
         )}
-        {error && <p className="text-[13px] text-destructive">{error}</p>}
+        {error && <p className="text-[13.5px] text-destructive">{error}</p>}
         <DialogFooter className="justify-between">
           <Button
             variant="ghost"
