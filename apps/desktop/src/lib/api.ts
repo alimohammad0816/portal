@@ -60,6 +60,7 @@ export const api = {
   currentNetwork: () => invoke<Network | null>("current_network"),
   exitInfo: () => invoke<ExitInfo>("exit_info"),
   setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
+  applySplit: () => invoke<number>("apply_split"),
   versions: () => invoke<Versions>("versions"),
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   installUpdate: () => invoke<string>("install_update"),

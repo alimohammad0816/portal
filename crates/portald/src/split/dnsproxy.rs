@@ -67,19 +67,66 @@ impl Sink {
     }
 }
 
-/// Which split names each recorded address was learned for, and until
-/// when, so a domain's addresses can be dropped from the nft sets as soon
-/// as its rule is removed instead of when their timeout runs out.
+/// How many recent answers to keep for names that aren't split (yet).
+const RECENT_MAX: usize = 4096;
+
+/// What the proxy remembers about answers.
 #[derive(Debug, Default)]
-pub struct Learned(HashMap<IpAddr, HashMap<String, Instant>>);
+pub struct Learned {
+    /// Which split names each address in the nft sets was learned for, and
+    /// until when, so a domain's addresses can leave the sets as soon as
+    /// its rule is removed instead of when their timeout runs out.
+    split: HashMap<IpAddr, HashMap<String, Instant>>,
+    /// Recent answers for every name. Apps keep using addresses they looked
+    /// up before a domain was listed; this is where those are found.
+    /// (resolved doesn't cache answers from this proxy: it's on localhost.)
+    recent: HashMap<String, (Vec<IpAddr>, Instant)>,
+}
+
+fn normalize(name: &str) -> String {
+    name.trim_end_matches('.').to_ascii_lowercase()
+}
 
 impl Learned {
+    fn remember(&mut self, name: &str, entries: &[(IpAddr, u32)], now: Instant) {
+        let secs = entries.iter().map(|(_, s)| *s).max().unwrap_or(MIN_TTL);
+        let until = now + Duration::from_secs(u64::from(secs));
+        if self.recent.len() >= RECENT_MAX {
+            self.recent.retain(|_, (_, u)| *u > now);
+            if self.recent.len() >= RECENT_MAX
+                && let Some(oldest) = self
+                    .recent
+                    .iter()
+                    .min_by_key(|(_, (_, u))| *u)
+                    .map(|(n, _)| n.clone())
+            {
+                self.recent.remove(&oldest);
+            }
+        }
+        let ips = entries.iter().map(|(ip, _)| *ip).collect();
+        self.recent.insert(normalize(name), (ips, until));
+    }
+
+    /// Recently answered addresses of names `domains` matches, with the
+    /// seconds they stay valid.
+    fn recent_matching(&self, domains: &DomainList, now: Instant) -> Vec<(String, IpAddr, u32)> {
+        self.recent
+            .iter()
+            .filter(|(n, (_, until))| *until > now && domains.matches(n))
+            .flat_map(|(n, (ips, until))| {
+                let left = u32::try_from((*until - now).as_secs()).unwrap_or(MAX_TTL);
+                ips.iter()
+                    .map(move |ip| (n.clone(), *ip, left.max(MIN_TTL)))
+            })
+            .collect()
+    }
+
     fn add(&mut self, name: &str, entries: &[(IpAddr, u32)], now: Instant) {
-        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        let name = normalize(name);
         for (ip, secs) in entries {
             let until = now + Duration::from_secs(u64::from(*secs));
             let slot = self
-                .0
+                .split
                 .entry(*ip)
                 .or_default()
                 .entry(name.clone())
@@ -88,12 +135,25 @@ impl Learned {
         }
     }
 
+    /// Live addresses learned for any name `domains` matches.
+    fn matching(&self, domains: &DomainList, now: Instant) -> Vec<IpAddr> {
+        self.split
+            .iter()
+            .filter(|(_, names)| {
+                names
+                    .iter()
+                    .any(|(n, until)| *until > now && domains.matches(n))
+            })
+            .map(|(ip, _)| *ip)
+            .collect()
+    }
+
     /// Forget names that `domains` no longer lists and return the addresses
     /// that are left without any, which should leave the nft sets now.
     /// Addresses whose entries already timed out are dropped silently.
     fn prune(&mut self, domains: &DomainList, now: Instant) -> Vec<IpAddr> {
         let mut gone = Vec::new();
-        self.0.retain(|ip, names| {
+        self.split.retain(|ip, names| {
             names.retain(|_, until| *until > now);
             if names.is_empty() {
                 return false;
@@ -237,18 +297,22 @@ async fn resolve(
         };
         match reply {
             Ok(r) => {
-                if route.record {
-                    let addrs: Vec<(IpAddr, u32)> = dnsmsg::answer_addresses(&r)
-                        .into_iter()
-                        .map(|(ip, ttl)| (ip, ttl.clamp(MIN_TTL, MAX_TTL)))
-                        .collect();
-                    if !addrs.is_empty() {
-                        debug!("split {:?}: {addrs:?}", name);
-                        if let (Some(n), Ok(mut l)) = (&name, learned.lock()) {
-                            l.add(n, &addrs, Instant::now());
-                        }
-                        sink.add(addrs).await;
+                let addrs: Vec<(IpAddr, u32)> = dnsmsg::answer_addresses(&r)
+                    .into_iter()
+                    .map(|(ip, ttl)| (ip, ttl.clamp(MIN_TTL, MAX_TTL)))
+                    .collect();
+                if let (Some(n), false) = (&name, addrs.is_empty())
+                    && let Ok(mut l) = learned.lock()
+                {
+                    let now = Instant::now();
+                    l.remember(n, &addrs, now);
+                    if route.record {
+                        l.add(n, &addrs, now);
                     }
+                }
+                if route.record && !addrs.is_empty() {
+                    debug!("split {:?}: {addrs:?}", name);
+                    sink.add(addrs).await;
                 }
                 return Some(r);
             }
@@ -358,6 +422,34 @@ impl Proxy {
         gone
     }
 
+    /// Split the addresses apps already looked up for `domains` before they
+    /// were listed, as if they had just been asked. Returns the entries for
+    /// the nft sets.
+    pub fn seed(&self, domains: &DomainList) -> Vec<(IpAddr, u32)> {
+        let Ok(c) = self.config.read() else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let mut out = Vec::new();
+        if let Ok(mut l) = self.learned.lock() {
+            for (name, ip, secs) in l.recent_matching(domains, now) {
+                if c.domains.matches(&name) {
+                    l.add(&name, &[(ip, secs)], now);
+                    out.push((ip, secs));
+                }
+            }
+        }
+        out
+    }
+
+    /// Addresses currently split because of a name `domains` matches.
+    pub fn learned_for(&self, domains: &DomainList) -> Vec<IpAddr> {
+        self.learned
+            .lock()
+            .map(|l| l.matching(domains, Instant::now()))
+            .unwrap_or_default()
+    }
+
     pub fn stop(self) {
         for t in self.tasks {
             t.abort();
@@ -418,11 +510,25 @@ mod tests {
         client.send(&query(2, "example.com")).await.unwrap();
         client.recv(&mut buf).await.unwrap();
         assert!(rx.try_recv().is_err(), "unlisted domains aren't recorded");
+        // ...but remembered: listing example.com later splits what the app
+        // already holds.
+        proxy.set_domains(DomainList::new(&[
+            Rule::parse("*.ir").unwrap(),
+            Rule::parse("example.com").unwrap(),
+        ]));
+        assert_eq!(
+            proxy.seed(&DomainList::new(&[Rule::parse("example.com").unwrap()])),
+            vec![("93.184.216.34".parse().unwrap(), MIN_TTL)]
+        );
 
-        // Rules change live, and the removed domain's address is handed back
-        // so it can leave the nft sets.
+        // Rules change live. The fake upstream gives every name the same
+        // address, which example.com still claims, so it stays split...
         let gone = proxy.set_domains(DomainList::new(&[Rule::parse("example.com").unwrap()]));
+        assert!(gone.is_empty());
+        // ...until no listed name claims it.
+        let gone = proxy.set_domains(DomainList::new(&[Rule::parse("other.org").unwrap()]));
         assert_eq!(gone, vec!["93.184.216.34".parse::<IpAddr>().unwrap()]);
+        proxy.set_domains(DomainList::new(&[Rule::parse("example.com").unwrap()]));
         client.send(&query(3, "a.example.com")).await.unwrap();
         client.recv(&mut buf).await.unwrap();
         assert!(rx.recv().await.is_some());
@@ -479,8 +585,13 @@ mod tests {
         assert_eq!(gone, vec![ip("46.36.99.104")]);
         // digikala.com still holds the shared address.
         assert!(l.prune(&list(&["digikala.com"]), later).is_empty());
+        assert_eq!(l.matching(&list(&["com"]), later), vec![ip("2.144.1.1")]);
+        assert!(
+            l.matching(&list(&["ir"]), later).is_empty(),
+            "pruned names don't count"
+        );
         assert_eq!(l.prune(&list(&[]), later), vec![ip("2.144.1.1")]);
-        assert!(l.0.is_empty());
+        assert!(l.split.is_empty());
     }
 
     #[test]

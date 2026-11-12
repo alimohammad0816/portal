@@ -405,6 +405,11 @@ async fn set_settings(daemon: State<'_, Daemon>, settings: Settings) -> Result<S
 }
 
 #[tauri::command]
+async fn apply_split(daemon: State<'_, Daemon>) -> Result<u32, String> {
+    daemon.get().await?.apply_split().await.map_err(err)
+}
+
+#[tauri::command]
 async fn get_log(daemon: State<'_, Daemon>) -> Result<Vec<String>, String> {
     daemon.get().await?.get_log().await.map_err(err)
 }
@@ -919,6 +924,7 @@ pub fn run() {
             get_log,
             get_settings,
             set_settings,
+            apply_split,
             list_apps,
             get_prefs,
             set_prefs,

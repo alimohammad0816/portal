@@ -1,4 +1,4 @@
-import { Plus, Search, X } from "lucide-react";
+import { Asterisk, Globe, ListFilter, MapPin, Network, Plus, RefreshCw, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Choice } from "@/components/SecuritySettings";
@@ -22,6 +22,13 @@ export function hostKind(h: string): "CIDR" | "IP" | "Wildcard" | "Domain" {
   if (/^[0-9.]+$/.test(h) || (h.includes(":") && /^[0-9a-fA-F:.]+$/.test(h))) return "IP";
   if (h.startsWith("*.")) return "Wildcard";
   return "Domain";
+}
+
+const KIND_ICON = { Domain: Globe, Wildcard: Asterisk, IP: MapPin, CIDR: Network } as const;
+
+/** `*.example.com` and `example.com` are the same rule. */
+function hostKey(h: string): string {
+  return h.toLowerCase().replace(/^\*\./, "").replace(/\.$/, "");
 }
 
 function validHost(h: string): boolean {
@@ -115,12 +122,31 @@ function AppGlyph({ name }: { name: string }) {
   );
 }
 
-function Section({ title, hint, action, children }: { title: string; hint: string; action?: React.ReactNode; children: React.ReactNode }) {
+function Section({
+  title,
+  hint,
+  count,
+  action,
+  children,
+}: {
+  title: string;
+  hint: string;
+  count?: number;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section className="grid gap-2 rounded-xl border p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="grid gap-0.5">
-          <span className="text-[13.5px] font-semibold">{title}</span>
+          <span className="flex items-center gap-1.5 text-[13.5px] font-semibold">
+            {title}
+            {!!count && (
+              <span className="rounded bg-accent px-1.5 text-[11px] leading-[18px] font-medium text-muted-foreground tabular-nums">
+                {count}
+              </span>
+            )}
+          </span>
           <span className="text-xs text-muted-foreground">{hint}</span>
         </div>
         {action}
@@ -140,6 +166,111 @@ function RemoveButton({ label, onClick }: { label: string; onClick: () => void }
     >
       <X className="size-3.5" />
     </button>
+  );
+}
+
+function Chip({ icon, label, title, onRemove }: { icon?: React.ReactNode; label: React.ReactNode; title: string; onRemove: () => void }) {
+  return (
+    <li title={title} className="flex h-7 max-w-full items-center gap-1.5 rounded-md border bg-subtle/60 pr-0.5 pl-2">
+      {icon}
+      <span className="selectable min-w-0 truncate font-mono text-xs">{label}</span>
+      <button
+        type="button"
+        aria-label={`Remove ${title}`}
+        onClick={onRemove}
+        className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-dim hover:bg-accent hover:text-foreground"
+      >
+        <X className="size-3" />
+      </button>
+    </li>
+  );
+}
+
+/** Rules as wrapping chips in a box that scrolls on its own once it fills,
+ * with a filter when there are many. */
+function HostList({ hosts, onRemove }: { hosts: string[]; onRemove: (h: string) => void }) {
+  const [filter, setFilter] = useState("");
+  const q = filter.trim().toLowerCase();
+  const shown = q ? hosts.filter((h) => h.toLowerCase().includes(q)) : hosts;
+  return (
+    <div className="grid gap-2">
+      {hosts.length > 8 && (
+        <label className="flex h-7 items-center gap-2 rounded-md border px-2 text-dim focus-within:border-ring">
+          <ListFilter className="size-3.5" />
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder={`Filter ${hosts.length} entries`}
+            aria-label="Filter sites and IP ranges"
+            className="min-w-0 flex-1 bg-transparent font-mono text-xs text-foreground outline-none placeholder:font-sans placeholder:text-dim"
+          />
+        </label>
+      )}
+      <ScrollFade className="-mx-1 max-h-[142px] overflow-y-auto px-1">
+        <ul className="flex flex-wrap gap-1.5">
+          {shown.map((h) => {
+            const kind = hostKind(h);
+            const Icon = KIND_ICON[kind];
+            return (
+              <Chip
+                key={h}
+                title={`${h} (${kind})`}
+                icon={<Icon className="size-3 shrink-0 text-dim" />}
+                label={h}
+                onRemove={() => onRemove(h)}
+              />
+            );
+          })}
+        </ul>
+        {q && shown.length === 0 && <p className="py-1 text-xs text-dim">Nothing matches.</p>}
+      </ScrollFade>
+    </div>
+  );
+}
+
+/** Rule changes reach new connections at once; this moves open ones too. */
+function ApplyBar({ pending }: { pending: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(() => setMessage(null), 5000);
+    return () => clearTimeout(t);
+  }, [message]);
+
+  async function apply() {
+    setBusy(true);
+    try {
+      const n = await api.applySplit();
+      setMessage(
+        n === 0
+          ? "Every open connection already follows the rules."
+          : `Closed ${n} connection${n === 1 ? "" : "s"}. Apps reconnect with the current rules.`,
+      );
+    } catch (e) {
+      setMessage(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={cn("flex items-center gap-3 rounded-xl border px-3 py-2.5", pending && "border-zinc-600 bg-subtle")}>
+      <span className="grid min-w-0 flex-1 gap-0.5" aria-live="polite">
+        <span className="text-[13px] font-medium">{pending ? "Open connections use older rules" : "Open connections"}</span>
+        <span className="text-xs leading-4 text-muted-foreground">
+          {message ??
+            (pending
+              ? "Removed rules and app changes reach them when you apply."
+              : "Added rules move them right away. Apply restarts the rest.")}
+        </span>
+      </span>
+      <Button size="sm" variant={pending ? "default" : "outline"} disabled={busy} onClick={apply}>
+        <RefreshCw className={cn(busy && "animate-spin")} />
+        Apply
+      </Button>
+    </div>
   );
 }
 
@@ -171,7 +302,7 @@ export function SplitSettings({
       return;
     }
     const next = [...split.hosts];
-    for (const h of items) if (!next.includes(h)) next.push(h);
+    for (const h of items) if (!next.some((x) => hostKey(x) === hostKey(h))) next.push(h);
     set({ hosts: next });
     setHost("");
     setHostError(null);
@@ -200,6 +331,8 @@ export function SplitSettings({
         <Switch id="split-on" checked={split.enabled} onCheckedChange={(v) => set({ enabled: v })} />
       </div>
 
+      {status.split_active && <ApplyBar pending={status.split_pending} />}
+
       <div className={cn("grid gap-3", !split.enabled && "pointer-events-none opacity-45")}>
         <div role="radiogroup" aria-label="Split mode" className="grid grid-cols-2 gap-2">
           <Choice
@@ -218,6 +351,7 @@ export function SplitSettings({
 
         <Section
           title="Apps"
+          count={split.apps.length}
           hint={exclude ? "These apps skip the VPN." : "Only these apps use the VPN."}
           action={
             <Button size="sm" variant="outline" onClick={() => setPickerOpen(true)}>
@@ -229,7 +363,7 @@ export function SplitSettings({
           {split.apps.length === 0 ? (
             <p className="text-xs text-dim">No apps yet.</p>
           ) : (
-            <div className="grid">
+            <ScrollFade className="-mx-1 grid max-h-[176px] overflow-y-auto px-1">
               {split.apps.map((a) => (
                 <div key={a.path} className="flex items-center gap-3 rounded-lg py-1">
                   <AppGlyph name={a.name} />
@@ -240,14 +374,18 @@ export function SplitSettings({
                   <RemoveButton label={`Remove ${a.name}`} onClick={() => set({ apps: split.apps.filter((x) => x.path !== a.path) })} />
                 </div>
               ))}
-            </div>
+            </ScrollFade>
           )}
           <p className="text-[12px] leading-4 text-dim">
             Or start any program this way: <span className="selectable font-mono text-muted-foreground">portal bypass -- firefox</span>
           </p>
         </Section>
 
-        <Section title="Sites and IP ranges" hint="Domains include their subdomains; *.ir covers a whole TLD.">
+        <Section
+          title="Sites and IP ranges"
+          count={split.hosts.length}
+          hint="Domains include their subdomains; *.ir covers a whole TLD."
+        >
           <div className="flex gap-2">
             <Input
               value={host}
@@ -256,7 +394,7 @@ export function SplitSettings({
                 setHostError(null);
               }}
               onKeyDown={(e) => e.key === "Enter" && addHost()}
-              placeholder="*.ir, digikala.com, 10.0.0.0/8"
+              placeholder="e.g. *.ir, example.com, 10.0.0.0/8"
               aria-label="Domain, IP address or network"
               className="h-8 font-mono text-xs"
             />
@@ -266,52 +404,49 @@ export function SplitSettings({
           </div>
           {hostError && <p className="text-xs text-destructive">{hostError}</p>}
           {split.hosts.length > 0 && (
-            <div className="grid">
-              {split.hosts.map((h) => (
-                <div key={h} className="flex items-center gap-2 py-0.5">
-                  <span className="w-[62px] shrink-0 rounded-md bg-accent py-0.5 text-center text-[11px] font-medium text-zinc-300">
-                    {hostKind(h)}
-                  </span>
-                  <span className="selectable min-w-0 flex-1 truncate font-mono text-xs">{h}</span>
-                  <RemoveButton label={`Remove ${h}`} onClick={() => set({ hosts: split.hosts.filter((x) => x !== h) })} />
-                </div>
-              ))}
-            </div>
+            <HostList hosts={split.hosts} onRemove={(h) => set({ hosts: split.hosts.filter((x) => x !== h) })} />
           )}
         </Section>
 
-        <Section title="Countries" hint="Every IP range registered to a country, updated weekly.">
-          <div className="flex flex-wrap gap-1.5">
+        <Section
+          title="Countries"
+          count={split.countries.length}
+          hint="Every IP range registered to a country, updated weekly."
+        >
+          <ul className="flex flex-wrap gap-1.5">
             {split.countries.map((c) => (
-              <span key={c} className="flex h-7 items-center gap-1.5 rounded-md border pr-1 pl-2 text-xs">
-                <span className="font-mono text-[12px] text-muted-foreground">{c}</span>
-                {COUNTRIES[c] ?? ""}
-                <button
-                  type="button"
-                  aria-label={`Remove ${c}`}
-                  onClick={() => set({ countries: split.countries.filter((x) => x !== c) })}
-                  className="cursor-pointer rounded p-0.5 text-dim hover:text-foreground"
-                >
-                  <X className="size-3" />
-                </button>
-              </span>
+              <Chip
+                key={c}
+                title={COUNTRIES[c] ?? c}
+                label={
+                  <>
+                    <span className="text-muted-foreground">{c}</span>
+                    {COUNTRIES[c] && <span className="ml-1.5 font-sans">{COUNTRIES[c]}</span>}
+                  </>
+                }
+                onRemove={() => set({ countries: split.countries.filter((x) => x !== c) })}
+              />
             ))}
             {!split.countries.includes("IR") && (
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => addCountry("IR")}>
-                <Plus />
-                Iran
-              </Button>
+              <li className="contents">
+                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => addCountry("IR")}>
+                  <Plus />
+                  Iran
+                </Button>
+              </li>
             )}
-            <Input
-              value={country}
-              maxLength={2}
-              onChange={(e) => setCountry(e.target.value.toUpperCase())}
-              onKeyDown={(e) => e.key === "Enter" && addCountry(country)}
-              placeholder="Code"
-              aria-label="Country code"
-              className="h-7 w-16 text-center font-mono text-xs"
-            />
-          </div>
+            <li className="contents">
+              <Input
+                value={country}
+                maxLength={2}
+                onChange={(e) => setCountry(e.target.value.toUpperCase())}
+                onKeyDown={(e) => e.key === "Enter" && addCountry(country)}
+                placeholder="Code"
+                aria-label="Country code"
+                className="h-7 w-16 text-center font-mono text-xs"
+              />
+            </li>
+          </ul>
         </Section>
 
         <p className="text-[12px] leading-4 text-dim">

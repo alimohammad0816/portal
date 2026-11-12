@@ -70,6 +70,8 @@ export interface Status {
   dns_servers: string[];
   split_active: boolean;
   split_needs_reconnect: boolean;
+  /** Open connections still follow older split rules (`applySplit` fixes it). */
+  split_pending: boolean;
   split_processes: number;
   proxy_address: string | null;
   request: InputRequest | null;
@@ -178,6 +180,7 @@ export const emptyStatus: Status = {
   dns_servers: [],
   split_active: false,
   split_needs_reconnect: false,
+  split_pending: false,
   split_processes: 0,
   proxy_address: null,
   request: null,

@@ -217,6 +217,18 @@ impl DaemonIface {
         self.mgr.lock().await.bypass(pid).map_err(failed)
     }
 
+    /// Close open connections that don't follow the current split rules
+    /// yet, so their apps reconnect on the right side. Returns the count.
+    async fn apply_split(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<u32> {
+        self.authorize(conn, &hdr, ACTION_SETTINGS).await?;
+        let n = self.mgr.lock().await.apply_split().map_err(failed)?;
+        Ok(u32::try_from(n).unwrap_or(u32::MAX))
+    }
+
     async fn get_settings(&self) -> fdo::Result<String> {
         to_json(self.mgr.lock().await.settings())
     }

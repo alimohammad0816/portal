@@ -226,13 +226,28 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
         if (status.state === "connected") {
           const include = (x: SettingsT) => x.split.enabled && x.split.mode === "include";
           const reconnect = include(prev) !== include(settings) || status.split_needs_reconnect;
-          setStatus({ split_needs_reconnect: reconnect, split_active: settings.split.enabled && !reconnect });
+          const removed = (a: string[], b: string[]) => a.some((x) => !b.includes(x));
+          const paths = (x: SettingsT) => x.split.apps.map((a) => a.path).join("\n");
+          const pending =
+            settings.split.enabled &&
+            (status.split_pending ||
+              removed(prev.split.hosts, settings.split.hosts) ||
+              removed(prev.split.countries, settings.split.countries) ||
+              paths(prev) !== paths(settings));
+          setStatus({
+            split_needs_reconnect: reconnect,
+            split_active: settings.split.enabled && !reconnect,
+            split_pending: pending,
+          });
         }
       }
       if (settings.firewall !== "auto") blockedAfterDrop = false;
       emit("portal://settings", settings);
       setStatus({});
       return settings;
+    case "apply_split":
+      setStatus({ split_pending: false });
+      return 3;
     case "simulate_drop":
       clearTimers();
       blockedAfterDrop = settings.firewall === "auto";

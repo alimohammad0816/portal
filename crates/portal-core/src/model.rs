@@ -176,6 +176,10 @@ pub struct Status {
     /// to or from include mode).
     #[serde(default)]
     pub split_needs_reconnect: bool,
+    /// Split rules changed in a way open connections don't follow yet
+    /// (removed rules, apps); `ApplySplit` closes them so they reconnect.
+    #[serde(default)]
+    pub split_pending: bool,
     /// Processes currently split by app rules or `portal bypass`.
     #[serde(default)]
     pub split_processes: usize,

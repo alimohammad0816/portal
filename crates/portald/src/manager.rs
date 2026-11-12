@@ -251,7 +251,7 @@ impl Manager {
         self.status.split_needs_reconnect = false;
         let result = match (old.split.enabled, s.enabled, self.split.mode()) {
             (_, false, Some(_)) => {
-                self.split.stop();
+                self.split.turn_off();
                 Ok(())
             }
             (_, true, Some(mode)) if mode == s.mode => self.split.update(&s, &self.geo.1),
@@ -317,6 +317,7 @@ impl Manager {
 
     fn refresh_split_status(&mut self) {
         self.status.split_active = self.split.mode().is_some();
+        self.status.split_pending = self.split.pending();
         self.status.split_processes = self.split.apps_moved();
     }
 
@@ -354,6 +355,15 @@ impl Manager {
     }
 
     /// Move the calling process into the split cgroup (`portal bypass`).
+    /// Close open connections that still follow older split rules.
+    /// Returns how many were closed.
+    pub fn apply_split(&mut self) -> Result<usize> {
+        let n = self.split.apply_now()?;
+        self.refresh_split_status();
+        self.publish();
+        Ok(n)
+    }
+
     pub fn bypass(&mut self, pid: u32) -> Result<()> {
         self.split.bypass(pid)?;
         self.refresh_split_status();

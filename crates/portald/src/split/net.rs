@@ -246,6 +246,28 @@ fn ip(args: &[&str]) -> Result<String> {
 }
 
 #[derive(Deserialize)]
+struct AddrJson {
+    #[serde(default)]
+    addr_info: Vec<AddrInfo>,
+}
+
+#[derive(Deserialize)]
+struct AddrInfo {
+    #[serde(default)]
+    local: Option<String>,
+}
+
+/// Addresses assigned to an interface.
+pub fn iface_addrs(iface: &str) -> Result<std::collections::HashSet<IpAddr>> {
+    let links: Vec<AddrJson> = serde_json::from_str(&ip(&["-j", "addr", "show", "dev", iface])?)?;
+    Ok(links
+        .iter()
+        .flat_map(|l| &l.addr_info)
+        .filter_map(|a| a.local.as_deref()?.parse().ok())
+        .collect())
+}
+
+#[derive(Deserialize)]
 struct RouteJson {
     #[serde(default)]
     gateway: Option<String>,

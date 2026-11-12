@@ -42,6 +42,7 @@ pub trait Daemon {
     /// Move the calling process (and its future children) into split
     /// tunneling.
     fn split_self(&self) -> zbus::Result<()>;
+    fn apply_split(&self) -> zbus::Result<u32>;
 
     /// Current `Settings` as JSON.
     fn get_settings(&self) -> zbus::Result<String>;

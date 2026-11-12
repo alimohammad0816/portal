@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 pub const CGROUP: &str = "portal-split";
-const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// How a listed app is recognized.
 #[derive(Debug, Clone, PartialEq, Eq)]

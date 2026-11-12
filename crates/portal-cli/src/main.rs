@@ -108,6 +108,9 @@ enum SplitCmd {
     Remove {
         items: Vec<String>,
     },
+    /// Close open connections that still follow older rules, so their apps
+    /// reconnect on the right side.
+    Apply,
 }
 
 #[tokio::main]
@@ -299,12 +302,21 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Split { action } => {
             let mut st: Settings = serde_json::from_str(&d.get_settings().await?)?;
+            if let Some(SplitCmd::Apply) = action {
+                let n = d.apply_split().await?;
+                println!("Closed {n} connection(s); their apps reconnect with the current rules.");
+                return Ok(());
+            }
             if let Some(a) = action {
                 apply_split(&mut st.split, a)?;
                 st = serde_json::from_str(&d.set_settings(&serde_json::to_string(&st)?).await?)?;
                 let s: Status = serde_json::from_str(&d.get_status().await?)?;
                 if s.split_needs_reconnect {
                     println!("Reconnect to switch modes.");
+                } else if s.split_pending {
+                    println!(
+                        "Open connections keep their old route; `portal split apply` moves them."
+                    );
                 }
             }
             print_split(&st.split);
@@ -596,6 +608,7 @@ fn print_settings(st: &Settings) {
 
 fn apply_split(sp: &mut SplitSettings, action: SplitCmd) -> Result<()> {
     match action {
+        SplitCmd::Apply => {}
         SplitCmd::On => sp.enabled = true,
         SplitCmd::Off => sp.enabled = false,
         SplitCmd::Mode { mode } => {
