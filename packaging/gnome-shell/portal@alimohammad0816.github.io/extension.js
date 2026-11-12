@@ -48,8 +48,9 @@ function parse(json, fallback) {
     }
 }
 
-const PortalToggle = GObject.registerClass(
-class PortalToggle extends QuickMenuToggle {
+const PortalToggle = GObject.registerClass({
+    Signals: {'state-changed': {}},
+}, class PortalToggle extends QuickMenuToggle {
     _init() {
         super._init({title: 'Portal', iconName: ICON_OFF, toggleMode: false});
         this.menu.setHeader(ICON, 'Portal', 'Not connected');
