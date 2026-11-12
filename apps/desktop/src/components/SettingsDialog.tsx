@@ -313,7 +313,7 @@ export function SettingsDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[calc(100%-2rem)] gap-3">
+      <DialogContent className="max-w-none content-start gap-3">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>Changes apply right away, without reconnecting.</DialogDescription>

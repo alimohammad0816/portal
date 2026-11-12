@@ -86,7 +86,11 @@ const MODES: { value: FirewallMode; title: string; description: string }[] = [
 export function FirewallSettings({ settings, onChange }: { settings: Settings; onChange: (s: Settings) => void }) {
   return (
     <div className="grid gap-4 pt-1">
-      <div role="radiogroup" aria-label="Firewall" className="grid gap-2">
+      <div className="grid gap-1">
+        <span className="text-[13.5px] font-medium">Kill switch</span>
+        <span className="text-xs leading-5 text-muted-foreground">Keeps apps from using your normal connection behind the VPN's back.</span>
+      </div>
+      <div role="radiogroup" aria-label="Kill switch" className="-mt-1 grid gap-2">
         {MODES.map((m) => (
           <Choice
             key={m.value}

@@ -561,6 +561,68 @@ pub fn strip_proxies(text: &str) -> String {
     out
 }
 
+/// Host names in the top-level `remote` lines that OpenVPN would have to
+/// resolve. Empty when the config should be left alone: a proxy resolves
+/// names itself, and `<connection>` blocks hold one remote each.
+pub fn remote_hosts(text: &str) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let first = words
+            .first()
+            .map(|w| w.trim_start_matches("--").to_ascii_lowercase())
+            .unwrap_or_default();
+        if first == "<connection>"
+            || first == "remote-random-hostname"
+            || PROXY_DIRECTIVES.contains(&first.as_str())
+        {
+            return Vec::new();
+        }
+        if first == "remote"
+            && let Some(host) = words.get(1)
+            && host.parse::<std::net::IpAddr>().is_err()
+            && !hosts.iter().any(|h| h.eq_ignore_ascii_case(host))
+        {
+            hosts.push(host.to_string());
+        }
+    }
+    hosts
+}
+
+/// Replace each `remote <host>` line with one line per address the host
+/// resolved to (`None` = it didn't resolve, so the line is dropped).
+/// Returns the text unchanged if that would leave no remote at all.
+pub fn pin_remotes(text: &str, resolve: impl Fn(&str) -> Option<Vec<std::net::IpAddr>>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut remotes = 0;
+    for raw in text.lines() {
+        let words: Vec<&str> = raw.split_whitespace().collect();
+        let is_remote = words
+            .first()
+            .is_some_and(|w| w.trim_start_matches("--").eq_ignore_ascii_case("remote"));
+        let host = words.get(1).copied().unwrap_or("");
+        if !is_remote || host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+            remotes += usize::from(is_remote);
+            out.push_str(raw);
+            out.push('\n');
+            continue;
+        }
+        let rest = words[2..].join(" ");
+        match resolve(host) {
+            Some(addrs) if !addrs.is_empty() => {
+                out.push_str(&format!("# Portal: {host} resolved in advance\n"));
+                for ip in addrs {
+                    remotes += 1;
+                    out.push_str(format!("remote {ip} {rest}").trim_end());
+                    out.push('\n');
+                }
+            }
+            _ => out.push_str(&format!("# Portal: skipped {host}, it didn't resolve\n")),
+        }
+    }
+    if remotes == 0 { text.to_string() } else { out }
+}
+
 /// Replace file references (`ca ca.crt`, `tls-auth ta.key 1`, ...) with inline
 /// blocks, reading each file relative to `base_dir`. Run this on the client
 /// side, as the user, before sending a config to the daemon.
@@ -646,6 +708,32 @@ pub fn guess_country(candidates: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pins_remote_hosts_to_addresses() {
+        let cfg = "client\nremote-random\nremote 198.51.100.1 443 udp\nremote vpn.example 1194 tcp\nremote dead.example 1194\n";
+        assert_eq!(remote_hosts(cfg), vec!["vpn.example", "dead.example"]);
+        let out = pin_remotes(cfg, |h| match h {
+            "vpn.example" => Some(vec![
+                "203.0.113.5".parse().unwrap(),
+                "203.0.113.6".parse().unwrap(),
+            ]),
+            _ => None,
+        });
+        assert!(out.contains("remote 198.51.100.1 443 udp\n"));
+        assert!(out.contains("remote 203.0.113.5 1194 tcp\nremote 203.0.113.6 1194 tcp\n"));
+        assert!(!out.contains("remote dead.example"));
+        assert!(out.contains("remote-random\n"));
+    }
+
+    #[test]
+    fn keeps_the_config_when_nothing_would_be_left() {
+        let cfg = "client\nremote dead.example 1194\n";
+        assert_eq!(pin_remotes(cfg, |_| None), cfg);
+        assert!(remote_hosts("remote a.example\nhttp-proxy p 8080\n").is_empty());
+        assert!(remote_hosts("<connection>\nremote a.example\n</connection>\n").is_empty());
+    }
+
     use super::*;
 
     const BASIC: &str = "client\ndev tun\nproto udp\nremote de-fra-02.example.net 1194\nremote-cert-tls server\nauth-user-pass\n<ca>\n-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n</ca>\n";

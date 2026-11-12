@@ -158,7 +158,6 @@ impl Backend for OpenVpn {
             .map(|p| p.dev_type)
             .unwrap_or_else(|_| "tun".into());
         let config: PathBuf = self.runtime_dir.join(format!("session-{seq}.ovpn"));
-        crate::profiles::write_private(&config, launch.config.as_bytes())?;
 
         let mut cmd = Command::new(&self.binary);
         cmd.arg("--config").arg(&config);
@@ -179,8 +178,7 @@ impl Backend for OpenVpn {
             }
         }
         cmd.args(&launch.args);
-        let spawned = cmd
-            .arg("--management")
+        cmd.arg("--management")
             .arg(&socket)
             .arg("unix")
             .args(["--management-hold", "--management-query-passwords"])
@@ -189,41 +187,59 @@ impl Backend for OpenVpn {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("starting {}", self.binary.display()));
-        let mut child = match spawned {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = std::fs::remove_file(&config);
-                return Err(e);
-            }
-        };
+            .kill_on_drop(true);
+        let binary = self.binary.clone();
 
-        // OpenVPN logs to stdout; stderr carries the odd early error.
-        if let Some(stderr) = child.stderr.take() {
-            let ev = events.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = ev.send((seq, Event::Log(line)));
-                }
-            });
-        }
-        if let Some(stdout) = child.stdout.take() {
-            let ev = events.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = ev.send((seq, Event::Log(line)));
-                }
-            });
-        }
-
-        let (stop_tx, stop_rx) = oneshot::channel();
+        let (stop_tx, mut stop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
+            let finish = |events: &EventTx, done_tx: oneshot::Sender<()>| {
+                let _ = events.send((seq, Event::Exited));
+                let _ = done_tx.send(());
+            };
+            // Resolve the servers' names here, quickly and all at once:
+            // OpenVPN tries one name at a time and a resolver that doesn't
+            // answer costs it 20 seconds each, during which it can't even
+            // be told to stop.
+            let text = tokio::select! {
+                text = pin_remote_hosts(launch.config, seq, &events) => text,
+                _ = &mut stop_rx => return finish(&events, done_tx),
+            };
+            let spawned = crate::profiles::write_private(&config, text.as_bytes()).and_then(|()| {
+                cmd.spawn()
+                    .with_context(|| format!("starting {}", binary.display()))
+            });
+            let mut child = match spawned {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&config);
+                    warn!("session {seq}: {e:#}");
+                    let _ = events.send((seq, Event::Fatal(format!("{e:#}"))));
+                    return finish(&events, done_tx);
+                }
+            };
+
+            // OpenVPN logs to stdout; stderr carries the odd early error.
+            if let Some(stderr) = child.stderr.take() {
+                let ev = events.clone();
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let _ = ev.send((seq, Event::Log(line)));
+                    }
+                });
+            }
+            if let Some(stdout) = child.stdout.take() {
+                let ev = events.clone();
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let _ = ev.send((seq, Event::Log(line)));
+                    }
+                });
+            }
+
             let result =
                 run_management(seq, &socket, &creds, &events, stop_rx, input_rx, &mut child).await;
             // OpenVPN has read its config long ago; it holds secrets-adjacent
@@ -255,8 +271,7 @@ impl Backend for OpenVpn {
                     .await;
             }
             let _ = std::fs::remove_file(&socket);
-            let _ = events.send((seq, Event::Exited));
-            let _ = done_tx.send(());
+            finish(&events, done_tx);
         });
 
         Ok(SessionHandle {
@@ -265,6 +280,63 @@ impl Backend for OpenVpn {
             input: Some(input_tx),
         })
     }
+}
+
+/// How long to wait for each server name before leaving it out.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Swap the config's `remote <name>` lines for the addresses the names
+/// resolve to now, dropping names that don't resolve in time.
+async fn pin_remote_hosts(text: String, seq: u64, events: &EventTx) -> String {
+    let hosts = portal_core::ovpn::remote_hosts(&text);
+    if hosts.is_empty() {
+        return text;
+    }
+    let mut lookups = tokio::task::JoinSet::new();
+    for host in hosts {
+        lookups.spawn(async move {
+            let found = tokio::time::timeout(
+                RESOLVE_TIMEOUT,
+                tokio::net::lookup_host(format!("{host}:0")),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|it| {
+                let mut ips: Vec<std::net::IpAddr> = Vec::new();
+                for a in it {
+                    if !ips.contains(&a.ip()) {
+                        ips.push(a.ip());
+                    }
+                }
+                // IPv6 only when there's nothing else: many networks
+                // have no IPv6 route and each try costs a timeout.
+                if ips.iter().any(|ip| ip.is_ipv4()) {
+                    ips.retain(|ip| ip.is_ipv4());
+                }
+                ips.truncate(8);
+                ips
+            })
+            .filter(|ips| !ips.is_empty());
+            (host, found)
+        });
+    }
+    let mut resolved = std::collections::HashMap::new();
+    while let Some(Ok((host, found))) = lookups.join_next().await {
+        let line = match &found {
+            Some(ips) => {
+                let list: Vec<String> = ips.iter().map(ToString::to_string).collect();
+                format!("Portal: {host} is {}", list.join(", "))
+            }
+            None => format!(
+                "Portal: {host} didn't resolve within {}s; leaving it out",
+                RESOLVE_TIMEOUT.as_secs()
+            ),
+        };
+        let _ = events.send((seq, Event::Log(line)));
+        resolved.insert(host, found);
+    }
+    portal_core::ovpn::pin_remotes(&text, |h| resolved.get(h).cloned().flatten())
 }
 
 async fn connect_socket(
