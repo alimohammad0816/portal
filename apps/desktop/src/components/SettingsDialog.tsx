@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { ScrollFade } from "@/components/ui/scroll-fade";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConnectionProxySettings, DnsSettings, FirewallSettings, GatewaySettings } from "@/components/SecuritySettings";
 import { GeneralSettings } from "@/components/GeneralSettings";
@@ -192,11 +193,10 @@ function LogView({ lines }: { lines: string[] }) {
   }, [lines]);
   return (
     <div className="grid gap-2">
-      <div
-        ref={ref}
-        className="selectable scroll-subtle h-80 overflow-auto rounded-lg border bg-subtle/50 p-3 font-mono text-[12px] leading-5 text-zinc-300"
-      >
-        {lines.length === 0 ? <span className="text-dim">No log lines yet.</span> : lines.map((l, i) => <div key={i}>{l}</div>)}
+      <div className="overflow-hidden rounded-lg border bg-subtle/50">
+        <ScrollFade ref={ref} className="selectable h-80 overflow-auto p-3 font-mono text-[12px] leading-5 text-zinc-300">
+          {lines.length === 0 ? <span className="text-dim">No log lines yet.</span> : lines.map((l, i) => <div key={i}>{l}</div>)}
+        </ScrollFade>
       </div>
       <div className="flex justify-end">
         <Button
@@ -328,16 +328,16 @@ export function SettingsDialog({
             <TabsTrigger value="about">General</TabsTrigger>
           </TabsList>
           <TabsContent value="split">
-            <div className="scroll-subtle max-h-[28rem] overflow-y-auto pr-1">
+            <ScrollFade className="max-h-[28rem] overflow-y-auto pr-1">
               <SplitSettings settings={settings} status={status} onChange={onSettingsChange} />
-            </div>
+            </ScrollFade>
           </TabsContent>
           <TabsContent value="firewall">
-            <div className="scroll-subtle grid max-h-[28rem] gap-4 overflow-y-auto pr-1">
+            <ScrollFade className="grid max-h-[28rem] gap-4 overflow-y-auto pr-1">
               <FirewallSettings settings={settings} onChange={onSettingsChange} />
               <ConnectionProxySettings settings={settings} onChange={onSettingsChange} />
               <GatewaySettings settings={settings} status={status} onChange={onSettingsChange} />
-            </div>
+            </ScrollFade>
           </TabsContent>
           <TabsContent value="dns">
             <DnsSettings settings={settings} status={status} onChange={onSettingsChange} />
@@ -353,7 +353,7 @@ export function SettingsDialog({
                 Import folder
               </Button>
             </div>
-            <div className="scroll-subtle max-h-[24rem] overflow-y-auto pr-1">
+            <ScrollFade className="max-h-[24rem] overflow-y-auto pr-1">
               {profiles.length === 0 ? (
                 <p className="py-6 text-center text-sm text-muted-foreground">No profiles yet.</p>
               ) : (
@@ -365,18 +365,18 @@ export function SettingsDialog({
                   />
                 ))
               )}
-            </div>
+            </ScrollFade>
           </TabsContent>
           <TabsContent value="log">
             <LogView lines={log} />
           </TabsContent>
           <TabsContent value="about">
-            <div className="scroll-subtle grid max-h-[28rem] gap-5 overflow-y-auto pr-1">
+            <ScrollFade className="grid max-h-[28rem] gap-5 overflow-y-auto pr-1">
               <GeneralSettings prefs={prefs} onChange={onPrefsChange} profiles={profiles} network={network} />
               <div className="border-t pt-1">
                 <AboutView u={updates} />
               </div>
-            </div>
+            </ScrollFade>
           </TabsContent>
         </Tabs>
       </DialogContent>

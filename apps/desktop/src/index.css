@@ -121,8 +121,31 @@
 .scroll-subtle:hover::-webkit-scrollbar-thumb {
   background-color: oklch(0.37 0.013 285.805);
 }
-.fade-bottom {
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+/* Edge fades for ScrollFade: shown only where content is hidden. */
+@property --fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --fade-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+.scroll-fade {
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent);
+  transition:
+    --fade-top 180ms ease,
+    --fade-bottom 180ms ease;
+}
+.scroll-fade[data-fade-top] {
+  --fade-top: 28px;
+}
+.scroll-fade[data-fade-bottom] {
+  --fade-bottom: 36px;
 }
 
 @keyframes map-pulse {

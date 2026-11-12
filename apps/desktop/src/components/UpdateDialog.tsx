@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ScrollFade } from "@/components/ui/scroll-fade";
 import { api, errorText, inTauri, type Release } from "@/lib/api";
 
 export function UpdateDialog({
@@ -47,8 +48,10 @@ export function UpdateDialog({
           </DialogDescription>
         </DialogHeader>
         {release?.notes && (
-          <div className="selectable scroll-subtle max-h-56 overflow-y-auto rounded-lg border bg-subtle/50 px-3 py-2.5 text-[13.5px] leading-6 whitespace-pre-line text-zinc-300">
-            {release.notes}
+          <div className="overflow-hidden rounded-lg border bg-subtle/50">
+            <ScrollFade className="selectable max-h-56 overflow-y-auto px-3 py-2.5 text-[13.5px] leading-6 whitespace-pre-line text-zinc-300">
+              {release.notes}
+            </ScrollFade>
           </div>
         )}
         {error && <p className="text-[13.5px] text-destructive">{error}</p>}

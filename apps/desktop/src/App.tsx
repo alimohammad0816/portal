@@ -22,6 +22,7 @@ import { type Latency, LocationList } from "@/components/LocationList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sparkline } from "@/components/Sparkline";
 import { Button } from "@/components/ui/button";
+import { ScrollFade } from "@/components/ui/scroll-fade";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UpdateDialog } from "@/components/UpdateDialog";
@@ -697,7 +698,7 @@ export function App() {
             />
           </label>
         </div>
-        <div className="scroll-subtle fade-bottom min-h-0 flex-1 overflow-y-auto px-2 pb-5">
+        <ScrollFade className="min-h-0 flex-1 overflow-y-auto px-2 pb-5">
           {daemon && !daemon.reachable ? (
             <DaemonDown info={daemon} onRetry={() => refreshAll().catch(() => {})} />
           ) : profiles.length === 0 ? (
@@ -716,7 +717,7 @@ export function App() {
               onToggleFavorite={toggleFavorite}
             />
           )}
-        </div>
+        </ScrollFade>
       </div>
 
       {dragging && (

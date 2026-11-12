@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ScrollFade } from "@/components/ui/scroll-fade";
 import { Switch } from "@/components/ui/switch";
 import { api, errorText, type InstalledApp, type Settings, type SplitSettings as Split, type Status } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -77,7 +78,7 @@ function AppPicker({
             className="min-w-0 flex-1 bg-transparent text-[13.5px] text-foreground outline-none placeholder:text-dim"
           />
         </label>
-        <div className="scroll-subtle -mx-1 h-80 overflow-y-auto px-1">
+        <ScrollFade className="-mx-1 h-80 overflow-y-auto px-1">
           {error && <p className="py-6 text-center text-xs text-destructive">{error}</p>}
           {!apps && !error && <p className="py-6 text-center text-xs text-muted-foreground">Looking for apps…</p>}
           {apps && shown.length === 0 && <p className="py-6 text-center text-xs text-muted-foreground">No apps match.</p>}
@@ -100,7 +101,7 @@ function AppPicker({
               </button>
             );
           })}
-        </div>
+        </ScrollFade>
       </DialogContent>
     </Dialog>
   );
