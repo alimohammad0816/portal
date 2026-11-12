@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use tunnel_core::ovpn;
-use tunnel_core::{AuthKind, Profile};
+use tunnel_core::{AuthKind, Profile, ProfileEdit};
 
 pub struct ProfileStore {
     dir: PathBuf,
@@ -98,6 +98,9 @@ impl ProfileStore {
             source_file: file_name.to_string(),
             imported_at: now(),
             last_connected_at: None,
+            key_encrypted: parsed.key_encrypted,
+            disable_dco: false,
+            extra_directives: String::new(),
         };
         write_private(
             &self.dir.join(format!("{id}.ovpn")),
@@ -108,23 +111,47 @@ impl ProfileStore {
         Ok(profile)
     }
 
-    pub fn update(&mut self, id: &str, name: &str, group: &str, country: &str) -> Result<Profile> {
+    /// The sanitized config text of `id`.
+    pub fn config_text(&self, id: &str) -> Result<String> {
+        let path = self
+            .config_path(id)
+            .ok_or_else(|| anyhow::anyhow!("no profile with id {id}"))?;
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+    }
+
+    pub fn update(&mut self, id: &str, edit: &ProfileEdit) -> Result<Profile> {
+        // Check everything before changing anything.
+        let extra = edit
+            .extra_directives
+            .as_deref()
+            .map(ovpn::sanitize_extra)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("Extra options: {e}"))?;
         let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) else {
             bail!("no profile with id {id}");
         };
-        let name = name.trim();
-        if !name.is_empty() {
+        if let Some(name) = edit.name.as_deref().map(str::trim)
+            && !name.is_empty()
+        {
             p.name = name.chars().take(80).collect();
         }
-        let group = group.trim();
-        if !group.is_empty() {
+        if let Some(group) = edit.group.as_deref().map(str::trim)
+            && !group.is_empty()
+        {
             p.group = group.chars().take(60).collect();
         }
-        let country = country.trim();
-        if country.len() == 2 && country.chars().all(|c| c.is_ascii_alphabetic()) {
-            p.country = Some(country.to_ascii_uppercase());
-        } else if country == "-" {
-            p.country = None;
+        if let Some(country) = edit.country.as_deref().map(str::trim) {
+            if country.len() == 2 && country.chars().all(|c| c.is_ascii_alphabetic()) {
+                p.country = Some(country.to_ascii_uppercase());
+            } else if country == "-" {
+                p.country = None;
+            }
+        }
+        if let Some(d) = edit.disable_dco {
+            p.disable_dco = d;
+        }
+        if let Some(extra) = extra {
+            p.extra_directives = extra;
         }
         let out = p.clone();
         self.save_index()?;
@@ -145,6 +172,17 @@ impl ProfileStore {
     pub fn mark_connected(&mut self, id: &str) {
         if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id) {
             p.last_connected_at = Some(now());
+            let _ = self.save_index();
+        }
+    }
+
+    /// OpenVPN asked for a key passphrase we didn't know about (PKCS#12
+    /// files, unusual PEM): remember, so the app asks up front next time.
+    pub fn set_key_encrypted(&mut self, id: &str) {
+        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == id)
+            && !p.key_encrypted
+        {
+            p.key_encrypted = true;
             let _ = self.save_index();
         }
     }
@@ -190,12 +228,31 @@ mod tests {
         assert_eq!(reopened.list().len(), 1);
 
         let u = store
-            .update(&p.id, "Amsterdam", "Provider A", "nl")
+            .update(
+                &p.id,
+                &ProfileEdit {
+                    name: Some("Amsterdam".into()),
+                    group: Some("Provider A".into()),
+                    country: Some("nl".into()),
+                    disable_dco: Some(true),
+                    extra_directives: Some("mssfix 1400\n".into()),
+                },
+            )
             .unwrap();
         assert_eq!(
             (u.name.as_str(), u.group.as_str()),
             ("Amsterdam", "Provider A")
         );
+        assert!(u.disable_dco);
+        assert_eq!(u.extra_directives, "mssfix 1400\n");
+        // Unsafe extra options are refused and nothing changes.
+        let bad = ProfileEdit {
+            name: Some("Changed".into()),
+            extra_directives: Some("up /bin/sh".into()),
+            ..Default::default()
+        };
+        assert!(store.update(&p.id, &bad).is_err());
+        assert_eq!(store.get(&p.id).unwrap().name, "Amsterdam");
 
         store.remove(&p.id).unwrap();
         assert!(store.list().is_empty());

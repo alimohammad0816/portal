@@ -13,6 +13,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 use tunnel_core::names::TUNNEL_IFACE;
+use tunnel_core::{InputKind, InputRequest};
 
 /// What a session reports back to the manager.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,24 +45,49 @@ pub enum Event {
         countries: Vec<String>,
         networks: Vec<String>,
     },
+    /// OpenVPN wants something we weren't given. With `live` the session
+    /// keeps waiting for [`SessionHandle::answer`]; otherwise it is ending
+    /// and has to be started again with the answer. `crv1` carries a
+    /// dynamic challenge's state id and username for that restart.
+    NeedsInput {
+        request: InputRequest,
+        live: bool,
+        crv1: Option<(String, String)>,
+    },
+    /// The server wants the user to sign in on this web page.
+    AuthUrl(String),
     /// The session is over.
     Exited,
 }
 
+pub type Credentials = tunnel_core::Secrets;
+
+/// What to run.
 #[derive(Debug, Clone, Default)]
-pub struct Credentials {
-    pub username: String,
-    pub password: String,
-    /// Static challenge response (OTP), if the profile has one.
-    pub response: Option<String>,
+pub struct Launch {
+    /// Full config text (sanitized profile plus the app's additions).
+    pub config: String,
+    /// Extra command-line options.
+    pub args: Vec<String>,
+    /// Turn off data channel offload, where OpenVPN has it.
+    pub disable_dco: bool,
 }
 
 pub struct SessionHandle {
     stop: Option<oneshot::Sender<()>>,
     done: oneshot::Receiver<()>,
+    input: Option<mpsc::UnboundedSender<String>>,
 }
 
 impl SessionHandle {
+    /// Send the answer to a pending challenge (`>INFOMSG:CR_TEXT`).
+    pub fn answer(&self, response: &str) -> bool {
+        self.input.as_ref().is_some_and(|tx| {
+            tx.send(format!("cr-response {}\n", base64(response.as_bytes())))
+                .is_ok()
+        })
+    }
+
     /// Ask the session to end and wait until it has, up to a few seconds.
     pub async fn stop(mut self) {
         if let Some(tx) = self.stop.take() {
@@ -77,9 +103,8 @@ pub trait Backend: Send + Sync {
     fn start(
         &self,
         seq: u64,
-        config: PathBuf,
+        launch: Launch,
         creds: Credentials,
-        extra_args: Vec<String>,
         events: EventTx,
     ) -> Result<SessionHandle>;
 }
@@ -92,19 +117,22 @@ pub struct OpenVpn {
     /// OpenVPN 2.7+ runs its own DNS hook unless told not to; we configure
     /// DNS through systemd-resolved ourselves.
     pub disable_dns_updown: bool,
+    /// OpenVPN 2.6+ knows `--disable-dco`.
+    pub has_dco: bool,
 }
 
 impl OpenVpn {
     pub fn new(binary: PathBuf, runtime_dir: PathBuf) -> Self {
-        let disable_dns_updown = std::process::Command::new(&binary)
+        let help = std::process::Command::new(&binary)
             .arg("--help")
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("--dns-updown"))
-            .unwrap_or(false);
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
         Self {
             binary,
             runtime_dir,
-            disable_dns_updown,
+            disable_dns_updown: help.contains("--dns-updown"),
+            has_dco: help.contains("--disable-dco"),
         }
     }
 }
@@ -113,20 +141,19 @@ impl Backend for OpenVpn {
     fn start(
         &self,
         seq: u64,
-        config: PathBuf,
+        launch: Launch,
         creds: Credentials,
-        extra_args: Vec<String>,
         events: EventTx,
     ) -> Result<SessionHandle> {
         std::fs::create_dir_all(&self.runtime_dir)
             .with_context(|| format!("creating {}", self.runtime_dir.display()))?;
         let socket = self.runtime_dir.join(format!("mgmt-{seq}.sock"));
         let _ = std::fs::remove_file(&socket);
-        let dev_type = std::fs::read_to_string(&config)
-            .ok()
-            .and_then(|t| tunnel_core::ovpn::sanitize(&t).ok())
+        let dev_type = tunnel_core::ovpn::sanitize(&launch.config)
             .map(|p| p.dev_type)
-            .unwrap_or_else(|| "tun".into());
+            .unwrap_or_else(|_| "tun".into());
+        let config: PathBuf = self.runtime_dir.join(format!("session-{seq}.ovpn"));
+        crate::profiles::write_private(&config, launch.config.as_bytes())?;
 
         let mut cmd = Command::new(&self.binary);
         cmd.arg("--config").arg(&config);
@@ -136,8 +163,18 @@ impl Backend for OpenVpn {
         if self.disable_dns_updown {
             cmd.args(["--dns-updown", "disable"]);
         }
-        cmd.args(&extra_args);
-        let mut child = cmd
+        if launch.disable_dco {
+            if self.has_dco {
+                cmd.arg("--disable-dco");
+            } else {
+                let _ = events.send((
+                    seq,
+                    Event::Log("This OpenVPN has no DCO; nothing to turn off.".into()),
+                ));
+            }
+        }
+        cmd.args(&launch.args);
+        let spawned = cmd
             .arg("--management")
             .arg(&socket)
             .arg("unix")
@@ -149,7 +186,14 @@ impl Backend for OpenVpn {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("starting {}", self.binary.display()))?;
+            .with_context(|| format!("starting {}", self.binary.display()));
+        let mut child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = std::fs::remove_file(&config);
+                return Err(e);
+            }
+        };
 
         // OpenVPN logs to stdout; stderr carries the odd early error.
         if let Some(stderr) = child.stderr.take() {
@@ -173,8 +217,13 @@ impl Backend for OpenVpn {
 
         let (stop_tx, stop_rx) = oneshot::channel();
         let (done_tx, done_rx) = oneshot::channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let result = run_management(seq, &socket, &creds, &events, stop_rx, &mut child).await;
+            let result =
+                run_management(seq, &socket, &creds, &events, stop_rx, input_rx, &mut child).await;
+            // OpenVPN has read its config long ago; it holds secrets-adjacent
+            // material (keys), so don't leave it lying around.
+            let _ = std::fs::remove_file(&config);
             if let Err(e) = result {
                 warn!("session {seq}: {e:#}");
                 let _ = events.send((seq, Event::Fatal(format!("{e:#}"))));
@@ -194,6 +243,7 @@ impl Backend for OpenVpn {
         Ok(SessionHandle {
             stop: Some(stop_tx),
             done: done_rx,
+            input: Some(input_tx),
         })
     }
 }
@@ -222,6 +272,7 @@ async fn run_management(
     creds: &Credentials,
     events: &EventTx,
     mut stop: oneshot::Receiver<()>,
+    mut input: mpsc::UnboundedReceiver<String>,
     child: &mut tokio::process::Child,
 ) -> Result<()> {
     let stream = connect_socket(socket, child).await?;
@@ -238,6 +289,9 @@ async fn run_management(
             _ = &mut stop, if !stopping => {
                 stopping = true;
                 wr.write_all(b"signal SIGTERM\n").await?;
+            }
+            Some(cmd) = input.recv() => {
+                wr.write_all(cmd.as_bytes()).await?;
             }
             line = lines.next_line() => {
                 let Some(line) = line? else { return Ok(()) };
@@ -289,41 +343,137 @@ fn handle_line(line: &str, creds: &Credentials, seq: u64, events: &EventTx) -> R
         "FATAL" => send(Event::Fatal(body.to_string())),
         "HOLD" => return Ok(vec!["hold release\n".into()]),
         "PASSWORD" => return Ok(password_reply(body, creds, &send)),
+        "INFOMSG" => info_message(body, &send),
         _ => {}
     }
     Ok(vec![])
 }
 
+/// `>INFOMSG:` carries web sign-in links and pending-auth challenges.
+fn info_message(body: &str, send: &dyn Fn(Event)) {
+    let (kind, rest) = body.split_once(':').unwrap_or((body, ""));
+    match kind {
+        // WEB_AUTH:flags:url, or the older OPEN_URL:url.
+        "WEB_AUTH" | "OPEN_URL" => {
+            let url = if kind == "WEB_AUTH" {
+                rest.split_once(':').map_or(rest, |(_, u)| u)
+            } else {
+                rest
+            };
+            if url.starts_with("https://") || url.starts_with("http://") {
+                send(Event::AuthUrl(url.to_string()));
+            }
+        }
+        // CR_TEXT:flags:text, answered with `cr-response` on this session.
+        "CR_TEXT" => {
+            let (flags, text) = rest.split_once(':').unwrap_or(("", rest));
+            send(Event::NeedsInput {
+                request: InputRequest {
+                    kind: InputKind::Challenge,
+                    message: Some(text.to_string()),
+                    echo: flags.split(',').any(|f| f == "E"),
+                },
+                live: true,
+                crv1: None,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// A dynamic challenge from a failed sign-in:
+/// `... ['CRV1:R,E:state_id:base64(username):text']`.
+fn parse_crv1(body: &str) -> Option<(InputRequest, String, String)> {
+    let start = body.find("CRV1:")? + 5;
+    let rest = body[start..].trim_end_matches(['\'', ']']);
+    let mut parts = rest.splitn(4, ':');
+    let flags = parts.next()?;
+    let state = parts.next()?.to_string();
+    let user = String::from_utf8(unbase64(parts.next()?)?).ok()?;
+    let text = parts.next().unwrap_or("").to_string();
+    Some((
+        InputRequest {
+            kind: InputKind::Challenge,
+            message: Some(text),
+            echo: flags.split(',').any(|f| f == "E"),
+        },
+        state,
+        user,
+    ))
+}
+
+fn needs(kind: InputKind, send: &dyn Fn(Event)) -> Vec<String> {
+    send(Event::NeedsInput {
+        request: InputRequest {
+            kind,
+            message: None,
+            echo: false,
+        },
+        live: false,
+        crv1: None,
+    });
+    vec!["signal SIGTERM\n".into()]
+}
+
 fn password_reply(body: &str, creds: &Credentials, send: &dyn Fn(Event)) -> Vec<String> {
+    let kind = body.split('\'').nth(1).unwrap_or("");
     if body.starts_with("Verification Failed") {
-        send(Event::Fatal(
-            "Authentication failed. Check your username and password.".into(),
-        ));
+        if let Some((request, state, user)) = parse_crv1(body) {
+            send(Event::NeedsInput {
+                request,
+                live: false,
+                crv1: Some((state, user)),
+            });
+        } else {
+            send(Event::Fatal(
+                match kind {
+                    "Private Key" => "The private key passphrase is wrong.",
+                    "HTTP Proxy" | "SOCKS Proxy" => "The proxy rejected its username or password.",
+                    _ => "Authentication failed. Check your username and password.",
+                }
+                .into(),
+            ));
+        }
         return vec!["signal SIGTERM\n".into()];
     }
-    let Some(kind) = body.split('\'').nth(1) else {
-        return vec![];
-    };
-    if kind == "Auth" {
-        let password = match &creds.response {
-            Some(resp) if body.contains("SC:") => {
-                format!(
-                    "SCRV1:{}:{}",
-                    base64(creds.password.as_bytes()),
-                    base64(resp.as_bytes())
-                )
+    match kind {
+        "Auth" => {
+            if creds.username.is_empty() && creds.password.is_empty() {
+                return needs(InputKind::Login, send);
             }
-            _ => creds.password.clone(),
-        };
-        vec![
-            format!("username \"Auth\" {}\n", quote(&creds.username)),
-            format!("password \"Auth\" {}\n", quote(&password)),
-        ]
-    } else {
-        send(Event::Fatal(format!(
-            "This profile needs a '{kind}' password, which isn't supported yet."
-        )));
-        vec!["signal SIGTERM\n".into()]
+            let password = match &creds.response {
+                Some(resp) if body.contains("SC:") => {
+                    format!(
+                        "SCRV1:{}:{}",
+                        base64(creds.password.as_bytes()),
+                        base64(resp.as_bytes())
+                    )
+                }
+                _ => creds.password.clone(),
+            };
+            vec![
+                format!("username \"Auth\" {}\n", quote(&creds.username)),
+                format!("password \"Auth\" {}\n", quote(&password)),
+            ]
+        }
+        "Private Key" => match &creds.key_passphrase {
+            Some(p) => vec![format!("password \"Private Key\" {}\n", quote(p))],
+            None => needs(InputKind::KeyPassphrase, send),
+        },
+        "HTTP Proxy" | "SOCKS Proxy" => match (&creds.proxy_username, &creds.proxy_password) {
+            (Some(u), Some(p)) => vec![
+                format!("username \"{kind}\" {}\n", quote(u)),
+                format!("password \"{kind}\" {}\n", quote(p)),
+            ],
+            _ => needs(InputKind::ProxyLogin, send),
+        },
+        "" => vec![],
+        other => {
+            send(Event::Fatal(format!(
+                "OpenVPN asked for a '{other}' password, which Tunnel can't provide."
+            )));
+            vec!["signal SIGTERM\n".into()]
+        }
     }
 }
 
@@ -366,26 +516,93 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
+fn unbase64(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() == 1 {
+            return None;
+        }
+        let mut n = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            n |= val(c)? << (18 - 6 * i);
+        }
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
 // ------------------------------------------------------------------- Mock --
 
 /// Fake backend: walks through the usual states and reports traffic.
+///
+/// A few usernames act out the less common sign-ins, for UI work:
+/// `challenge` gets a dynamic challenge (answer `123456`), `pending` a
+/// live one; a profile with an encrypted key wants the passphrase `secret`.
 pub struct Mock;
 
 impl Backend for Mock {
     fn start(
         &self,
         seq: u64,
-        _config: PathBuf,
-        _creds: Credentials,
-        _extra_args: Vec<String>,
+        launch: Launch,
+        creds: Credentials,
         events: EventTx,
     ) -> Result<SessionHandle> {
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let (done_tx, done_rx) = oneshot::channel();
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<String>();
+        let key_encrypted = tunnel_core::ovpn::sanitize(&launch.config)
+            .map(|p| p.key_encrypted)
+            .unwrap_or(false);
         tokio::spawn(async move {
             let send = |e: Event| {
                 let _ = events.send((seq, e));
             };
+            let end = |send: &dyn Fn(Event)| {
+                send(Event::Exited);
+            };
+            if key_encrypted && creds.key_passphrase.as_deref() != Some("secret") {
+                if creds.key_passphrase.is_some() {
+                    send(Event::Fatal("The private key passphrase is wrong.".into()));
+                } else {
+                    needs(InputKind::KeyPassphrase, &send);
+                }
+                end(&send);
+                let _ = done_tx.send(());
+                return;
+            }
+            if creds.username == "challenge" && !creds.password.starts_with("CRV1::") {
+                let msg = ">PASSWORD:Verification Failed: 'Auth' ['CRV1:R,E:mockstate:Y2hhbGxlbmdl:Enter the code from your authenticator app']";
+                password_reply(msg.strip_prefix(">PASSWORD:").unwrap_or(msg), &creds, &send);
+                end(&send);
+                let _ = done_tx.send(());
+                return;
+            }
+            if creds.password.starts_with("CRV1::") && creds.password != "CRV1::mockstate::123456" {
+                send(Event::Fatal(
+                    "Authentication failed. Check your username and password.".into(),
+                ));
+                end(&send);
+                let _ = done_tx.send(());
+                return;
+            }
             let steps = ["RESOLVE", "WAIT", "AUTH", "GET_CONFIG", "ASSIGN_IP"];
             for name in steps {
                 send(Event::State {
@@ -397,6 +614,18 @@ impl Backend for Mock {
                 tokio::select! {
                     _ = &mut stop_rx => { send(Event::Exited); let _ = done_tx.send(()); return; }
                     _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+                if name == "AUTH" && creds.username == "pending" {
+                    info_message(
+                        "CR_TEXT:R,E:Approve the sign-in on your phone, then enter the number shown",
+                        &send,
+                    );
+                    tokio::select! {
+                        _ = &mut stop_rx => { send(Event::Exited); let _ = done_tx.send(()); return; }
+                        answer = input_rx.recv() => {
+                            send(Event::Log(format!("MOCK: got {}", answer.unwrap_or_default().trim())));
+                        }
+                    }
                 }
             }
             send(Event::Log(
@@ -433,6 +662,7 @@ impl Backend for Mock {
         Ok(SessionHandle {
             stop: Some(stop_tx),
             done: done_rx,
+            input: Some(input_tx),
         })
     }
 }
@@ -488,7 +718,7 @@ mod tests {
         let creds = Credentials {
             username: "ali".into(),
             password: "p\"w\\d".into(),
-            response: None,
+            ..Default::default()
         };
         let (replies, _) = collect(">PASSWORD:Need 'Auth' username/password", &creds);
         assert_eq!(
@@ -506,6 +736,7 @@ mod tests {
             username: "u".into(),
             password: "pass".into(),
             response: Some("123456".into()),
+            ..Default::default()
         };
         let (replies, _) = collect(
             ">PASSWORD:Need 'Auth' username/password SC:1,Enter OTP",
@@ -528,6 +759,101 @@ mod tests {
     }
 
     #[test]
+    fn asks_for_what_it_lacks() {
+        let none = Credentials::default();
+        for (line, kind) in [
+            (">PASSWORD:Need 'Auth' username/password", InputKind::Login),
+            (
+                ">PASSWORD:Need 'Private Key' password",
+                InputKind::KeyPassphrase,
+            ),
+            (
+                ">PASSWORD:Need 'HTTP Proxy' username/password",
+                InputKind::ProxyLogin,
+            ),
+            (
+                ">PASSWORD:Need 'SOCKS Proxy' username/password",
+                InputKind::ProxyLogin,
+            ),
+        ] {
+            let (replies, ev) = collect(line, &none);
+            assert_eq!(replies, vec!["signal SIGTERM\n"], "{line}");
+            assert!(
+                matches!(&ev[0], Event::NeedsInput { request, live: false, crv1: None } if request.kind == kind),
+                "{line}: {ev:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn answers_key_and_proxy_prompts() {
+        let creds = Credentials {
+            key_passphrase: Some("k".into()),
+            proxy_username: Some("pu".into()),
+            proxy_password: Some("pp".into()),
+            ..Default::default()
+        };
+        let (r, _) = collect(">PASSWORD:Need 'Private Key' password", &creds);
+        assert_eq!(r, vec!["password \"Private Key\" \"k\"\n"]);
+        let (r, _) = collect(">PASSWORD:Need 'HTTP Proxy' username/password", &creds);
+        assert_eq!(
+            r,
+            vec![
+                "username \"HTTP Proxy\" \"pu\"\n",
+                "password \"HTTP Proxy\" \"pp\"\n"
+            ]
+        );
+        let (_, ev) = collect(">PASSWORD:Verification Failed: 'Private Key'", &creds);
+        assert!(matches!(&ev[0], Event::Fatal(m) if m.contains("passphrase")));
+    }
+
+    #[test]
+    fn parses_dynamic_challenge() {
+        let (replies, ev) = collect(
+            ">PASSWORD:Verification Failed: 'Auth' ['CRV1:R,E:Om01u7Fh4LrGBS7uh0SWmzwabUiGiW6l:Y3Ix:Please enter token PIN']",
+            &Credentials::default(),
+        );
+        assert_eq!(replies, vec!["signal SIGTERM\n"]);
+        match &ev[0] {
+            Event::NeedsInput {
+                request,
+                live: false,
+                crv1: Some((state, user)),
+            } => {
+                assert_eq!(request.kind, InputKind::Challenge);
+                assert_eq!(request.message.as_deref(), Some("Please enter token PIN"));
+                assert!(request.echo);
+                assert_eq!(state, "Om01u7Fh4LrGBS7uh0SWmzwabUiGiW6l");
+                assert_eq!(user, "cr1");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn handles_info_messages() {
+        let (_, ev) = collect(
+            ">INFOMSG:WEB_AUTH::https://sso.example/auth?x=1",
+            &Credentials::default(),
+        );
+        assert_eq!(
+            ev,
+            vec![Event::AuthUrl("https://sso.example/auth?x=1".into())]
+        );
+        let (_, ev) = collect(
+            ">INFOMSG:OPEN_URL:javascript:alert(1)",
+            &Credentials::default(),
+        );
+        assert!(ev.is_empty());
+        let (_, ev) = collect(">INFOMSG:CR_TEXT:R:Enter the code", &Credentials::default());
+        assert!(matches!(
+            &ev[0],
+            Event::NeedsInput { request, live: true, .. }
+                if request.message.as_deref() == Some("Enter the code") && !request.echo
+        ));
+    }
+
+    #[test]
     fn releases_hold() {
         let (replies, _) = collect(">HOLD:Waiting for hold release:0", &Credentials::default());
         assert_eq!(replies, vec!["hold release\n"]);
@@ -539,5 +865,9 @@ mod tests {
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        for s in [&b""[..], b"f", b"fo", b"foo", b"foobar", b"\xff\x00\x10"] {
+            assert_eq!(unbase64(&base64(s)).unwrap(), s);
+        }
+        assert!(unbase64("a").is_none());
     }
 }

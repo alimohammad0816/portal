@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import type { FirewallMode, Settings, Status } from "@/lib/api";
+import { api, type FirewallMode, type ProxyKind, type Settings, type Status } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export function Choice({
@@ -111,6 +111,136 @@ export function FirewallSettings({ settings, onChange }: { settings: Settings; o
         checked={settings.block_ipv6}
         onChange={(v) => onChange({ ...settings, block_ipv6: v })}
       />
+    </div>
+  );
+}
+
+const PROXY_KINDS: { value: ProxyKind; label: string }[] = [
+  { value: "profile", label: "Off" },
+  { value: "http", label: "HTTP" },
+  { value: "socks", label: "SOCKS5" },
+];
+
+/** Reach VPN servers through a proxy, e.g. on networks that only allow web traffic. */
+export function ConnectionProxySettings({ settings, onChange }: { settings: Settings; onChange: (s: Settings) => void }) {
+  const cp = settings.connection_proxy;
+  const [host, setHost] = useState(cp.host);
+  const [port, setPort] = useState(String(cp.port));
+  const [error, setError] = useState<string | null>(null);
+  const [savedLogin, setSavedLogin] = useState(false);
+  useEffect(() => setHost(cp.host), [cp.host]);
+  useEffect(() => setPort(String(cp.port)), [cp.port]);
+  useEffect(() => {
+    if (cp.auth) api.savedCredentials("").then((s) => setSavedLogin(s.proxy)).catch(() => {});
+  }, [cp.auth]);
+
+  // A type chosen while the address is still empty; saved once it's typed.
+  const [pendingKind, setPendingKind] = useState<ProxyKind | null>(null);
+
+  function save(next: Partial<Settings["connection_proxy"]>) {
+    const merged = { ...cp, host: host.trim(), port: Number(port), ...next };
+    if (merged.kind !== "profile") {
+      if (!merged.host) {
+        setError("Enter the proxy's address.");
+        return;
+      }
+      if (!Number.isInteger(merged.port) || merged.port < 1 || merged.port > 65535) {
+        setError("Use a port between 1 and 65535.");
+        return;
+      }
+    }
+    setError(null);
+    setPendingKind(null);
+    onChange({ ...settings, connection_proxy: merged });
+  }
+
+  const shownKind = pendingKind ?? cp.kind;
+  const on = shownKind !== "profile";
+
+  return (
+    <div className="grid gap-3 rounded-xl border p-3">
+      <div className="grid gap-1">
+        <span className="text-[13px] font-medium">Connect through a proxy</span>
+        <span className="text-xs leading-5 text-muted-foreground">
+          For networks that only let web traffic out. Off uses the profile's own proxy, if it has one.
+        </span>
+      </div>
+      <div role="radiogroup" aria-label="Proxy type" className="grid grid-cols-3 gap-1 rounded-lg bg-subtle p-1">
+        {PROXY_KINDS.map((k) => (
+          <button
+            key={k.value}
+            type="button"
+            role="radio"
+            aria-checked={shownKind === k.value}
+            onClick={() => {
+              if (k.value === "profile" || host.trim()) save({ kind: k.value });
+              else setPendingKind(k.value);
+            }}
+            className={cn(
+              "h-7 cursor-pointer rounded-md text-xs font-medium transition-colors",
+              shownKind === k.value ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {k.label}
+          </button>
+        ))}
+      </div>
+      {on && (
+        <>
+          <div className="grid grid-cols-[minmax(0,1fr)_84px] gap-2">
+            <Input
+              aria-label="Proxy host"
+              placeholder="proxy.example.com"
+              value={host}
+              onChange={(e) => {
+                setHost(e.target.value);
+                setError(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && save({ kind: shownKind })}
+              onBlur={() => host.trim() && save({ kind: shownKind })}
+              className="h-8 font-mono text-[13px]"
+            />
+            <Input
+              aria-label="Proxy port"
+              inputMode="numeric"
+              value={port}
+              onChange={(e) => {
+                setPort(e.target.value);
+                setError(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && save({ kind: shownKind })}
+              onBlur={() => host.trim() && save({ kind: shownKind })}
+              className="h-8 font-mono text-[13px]"
+            />
+          </div>
+          <Toggle
+            id="proxy-auth"
+            title="Proxy needs a password"
+            description={
+              cp.auth && savedLogin
+                ? "Your proxy sign-in is saved in your keyring."
+                : "You'll be asked for it when connecting; it's kept in your keyring, not by the service."
+            }
+            checked={cp.auth}
+            onChange={(v) => save({ kind: shownKind, auth: v })}
+          />
+          {cp.auth && savedLogin && (
+            <div className="flex justify-end">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-muted-foreground"
+                onClick={() => api.forgetCredentials("", "proxy").then(() => setSavedLogin(false)).catch(() => {})}
+              >
+                Forget proxy sign-in
+              </Button>
+            </div>
+          )}
+          {pendingKind && !host.trim() && !error && <span className="text-xs text-muted-foreground">Enter the proxy's address to turn it on.</span>}
+          {cp.kind !== "profile" && <span className="text-xs text-muted-foreground">Applies the next time you connect.</span>}
+        </>
+      )}
+      {error && <span className="text-xs text-destructive">{error}</span>}
     </div>
   );
 }

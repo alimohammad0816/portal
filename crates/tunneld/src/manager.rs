@@ -14,9 +14,11 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 use tunnel_core::names::TUNNEL_IFACE;
 use tunnel_core::split::{DomainList, Rule};
-use tunnel_core::{ConnState, DnsMode, FirewallMode, Profile, Settings, SplitMode, Status};
+use tunnel_core::{
+    ConnState, DnsMode, FirewallMode, InputKind, Profile, ProfileEdit, Settings, SplitMode, Status,
+};
 
-use crate::backend::{Backend, Credentials, Event, EventTx, SessionHandle};
+use crate::backend::{Backend, Credentials, Event, EventTx, Launch, SessionHandle};
 use crate::dns::LinkDns;
 use crate::firewall::{self, Firewall, Plan};
 use crate::gateway::Gateway;
@@ -77,6 +79,21 @@ pub struct Manager {
     /// The physical network's resolvers, learned when DNS was applied.
     direct_dns: Vec<IpAddr>,
     gateway: Option<Gateway>,
+
+    pending: Option<Pending>,
+    /// What this session was started with, kept only while it runs or
+    /// waits for the user, to answer a dynamic challenge.
+    session_secrets: Option<Credentials>,
+}
+
+/// The connection is waiting for the user.
+#[derive(Debug, Clone)]
+enum Pending {
+    /// The session is still running and takes the answer directly.
+    Live,
+    /// The session ended; connect again with what the user gives us. A
+    /// dynamic challenge carries its state id and username.
+    Restart { crv1: Option<(String, String)> },
 }
 
 pub type Shared = Arc<Mutex<Manager>>;
@@ -142,6 +159,8 @@ impl Manager {
             geo: (Vec::new(), Vec::new()),
             direct_dns: Vec::new(),
             gateway: None,
+            pending: None,
+            session_secrets: None,
         };
         mgr.sync_firewall();
         mgr.load_geo();
@@ -178,8 +197,8 @@ impl Manager {
         Ok(p)
     }
 
-    pub fn update(&mut self, id: &str, name: &str, group: &str, country: &str) -> Result<Profile> {
-        self.store.update(id, name, group, country)
+    pub fn update(&mut self, id: &str, edit: &ProfileEdit) -> Result<Profile> {
+        self.store.update(id, edit)
     }
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
@@ -358,6 +377,8 @@ impl Manager {
         }
         let old = self.session.take();
         self.split.stop();
+        self.pending = None;
+        self.session_secrets = Some(creds.clone());
         self.seq += 1;
         self.user_stopped = false;
         self.last_bytes = None;
@@ -383,20 +404,19 @@ impl Manager {
         {
             return Ok(());
         }
-        let config = self
-            .store
-            .config_path(id)
-            .ok_or_else(|| anyhow!("profile disappeared"))?;
-        // Include mode: OpenVPN must not route anything itself; split rules
-        // decide what enters the tunnel.
-        let extra = if self.session_include {
-            vec!["--route-noexec".to_string()]
-        } else {
-            Vec::new()
+        let launch = match self.launch(id) {
+            Ok(l) => l,
+            Err(e) => {
+                self.status.state = ConnState::Disconnected;
+                self.status.error = Some(format!("{e:#}"));
+                self.sync_firewall();
+                self.publish();
+                return Err(e);
+            }
         };
         match self
             .backend
-            .start(self.seq, config, creds, extra, self.events.clone())
+            .start(self.seq, launch, creds, self.events.clone())
         {
             Ok(handle) => {
                 self.session = Some(handle);
@@ -412,8 +432,97 @@ impl Manager {
         }
     }
 
+    /// The config OpenVPN runs: the profile, its extra options, and the
+    /// app's proxy.
+    fn launch(&self, id: &str) -> Result<Launch> {
+        let profile = self
+            .store
+            .get(id)
+            .ok_or_else(|| anyhow!("profile disappeared"))?;
+        let mut config = self.store.config_text(id)?;
+        let proxy = &self.settings.connection_proxy;
+        if let Some(lines) = proxy.directives() {
+            config = tunnel_core::ovpn::strip_proxies(&config);
+            config.push_str("\n# Tunnel: connection proxy\n");
+            config.push_str(&lines);
+        }
+        if !profile.extra_directives.is_empty() {
+            config.push_str("\n# Tunnel: extra options\n");
+            config.push_str(&profile.extra_directives);
+        }
+        // Include mode: OpenVPN must not route anything itself; split rules
+        // decide what enters the tunnel.
+        let args = if self.session_include {
+            vec!["--route-noexec".to_string()]
+        } else {
+            Vec::new()
+        };
+        Ok(Launch {
+            config,
+            args,
+            disable_dco: profile.disable_dco,
+        })
+    }
+
+    /// Answer a challenge. A live one goes to the running session; for a
+    /// dynamic one, returns the profile and secrets to connect again with.
+    pub fn answer(&mut self, response: &str) -> Result<Option<(String, Credentials)>> {
+        let waiting = self.status.state == ConnState::NeedsCredentials
+            && self
+                .status
+                .request
+                .as_ref()
+                .is_some_and(|r| r.kind == InputKind::Challenge);
+        if !waiting {
+            bail!("Nothing is waiting for an answer.");
+        }
+        match self.pending.take() {
+            Some(Pending::Live) => {
+                if !self.session.as_ref().is_some_and(|s| s.answer(response)) {
+                    bail!("The connection has ended.");
+                }
+                self.status.state = ConnState::Connecting;
+                self.status.request = None;
+                self.sync_firewall();
+                self.publish();
+                Ok(None)
+            }
+            Some(Pending::Restart {
+                crv1: Some((state, user)),
+            }) => {
+                let id = self
+                    .status
+                    .profile_id
+                    .clone()
+                    .ok_or_else(|| anyhow!("no profile"))?;
+                let mut creds = self.session_secrets.clone().unwrap_or_default();
+                creds.username = user;
+                creds.password = format!("CRV1::{state}::{response}");
+                creds.response = None;
+                Ok(Some((id, creds)))
+            }
+            other => {
+                self.pending = other;
+                bail!("Nothing is waiting for an answer.")
+            }
+        }
+    }
+
     /// Stop the session, if any, and lift a kill-switch block.
     pub fn begin_disconnect(&mut self) -> Option<SessionHandle> {
+        if self.session.is_none() && self.status.state == ConnState::NeedsCredentials {
+            // Waiting for the user, who changed their mind.
+            self.pending = None;
+            self.session_secrets = None;
+            self.status = Status {
+                state: ConnState::Disconnected,
+                profile_id: self.status.profile_id.take(),
+                ..Status::default()
+            };
+            self.sync_firewall();
+            self.publish();
+            return None;
+        }
         if self.blocked_after_drop {
             self.blocked_after_drop = false;
             self.status.error = None;
@@ -575,6 +684,9 @@ impl Manager {
             return;
         }
         match event {
+            // The session is ending because it needs the user; its last
+            // states don't matter.
+            Event::State { .. } if matches!(self.pending, Some(Pending::Restart { .. })) => {}
             Event::State {
                 name,
                 tunnel_ip,
@@ -583,6 +695,9 @@ impl Manager {
                 match name.as_str() {
                     "CONNECTED" => {
                         self.status.state = ConnState::Connected;
+                        self.status.auth_url = None;
+                        self.status.request = None;
+                        self.pending = None;
                         self.status.connected_since = Some(now());
                         self.status.tunnel_ip = tunnel_ip;
                         self.status.server_ip = server_ip;
@@ -667,12 +782,56 @@ impl Manager {
                 self.publish();
             }
             Event::GeoLoaded { .. } => {}
+            Event::NeedsInput {
+                request,
+                live,
+                crv1,
+            } => {
+                if request.kind == InputKind::KeyPassphrase
+                    && let Some(id) = self.status.profile_id.clone()
+                {
+                    self.store.set_key_encrypted(&id);
+                }
+                self.pending = Some(if live {
+                    Pending::Live
+                } else {
+                    Pending::Restart { crv1 }
+                });
+                self.status.state = ConnState::NeedsCredentials;
+                self.status.request = Some(request);
+                self.status.error = None;
+                self.publish();
+            }
+            Event::AuthUrl(url) => {
+                self.push_log(format!("The server asks you to sign in at {url}"));
+                self.status.auth_url = Some(url);
+                self.publish();
+            }
             Event::Fatal(msg) => {
                 self.status.error = Some(msg);
                 self.publish();
             }
+            Event::Exited if matches!(self.pending, Some(Pending::Restart { .. })) => {
+                // Waiting for the user; the firewall keeps blocking as if
+                // we were still connecting.
+                self.session = None;
+                self.split.stop();
+                self.refresh_split_status();
+                self.dns_ready = false;
+                let keep = std::mem::take(&mut self.status);
+                self.status = Status {
+                    state: ConnState::NeedsCredentials,
+                    profile_id: keep.profile_id,
+                    request: keep.request,
+                    ..Status::default()
+                };
+                self.sync_firewall();
+                self.publish();
+            }
             Event::Exited => {
                 self.session = None;
+                self.pending = None;
+                self.session_secrets = None;
                 self.split.stop();
                 let dropped = !self.user_stopped;
                 let error = self.status.error.take().or_else(|| {
@@ -923,6 +1082,127 @@ mod tests {
         let m = f.mgr.lock().await;
         assert!(m.session_include);
         assert!(!m.plan().dns_guard);
+    }
+
+    async fn start(f: &Fixture, creds: Credentials) {
+        let mut m = f.mgr.lock().await;
+        assert!(m.begin_connect(&f.id, &creds).unwrap().is_none());
+        m.finish_connect(&f.id, creds).unwrap();
+    }
+
+    #[tokio::test]
+    async fn answers_a_dynamic_challenge_by_reconnecting() {
+        let mut f = setup_with(
+            "client\nremote de-fra-02.example.net 1194\nauth-user-pass\n",
+            Some(Settings {
+                firewall: FirewallMode::Auto,
+                ..Settings::default()
+            }),
+        )
+        .await;
+        let creds = Credentials {
+            username: "challenge".into(),
+            password: "pw".into(),
+            ..Default::default()
+        };
+        start(&f, creds).await;
+        let s = wait_for(&mut f.rx, |s| {
+            s.state == ConnState::NeedsCredentials && f_session_gone(s)
+        })
+        .await;
+        let req = s.request.unwrap();
+        assert_eq!(req.kind, InputKind::Challenge);
+        assert!(req.message.unwrap().contains("authenticator"));
+        // Still blocking while we wait for the user.
+        assert!(f.mgr.lock().await.plan().block);
+
+        let restart = f.mgr.lock().await.answer("123456").unwrap();
+        let (id, creds) = restart.unwrap();
+        assert_eq!(creds.username, "challenge");
+        assert_eq!(creds.password, "CRV1::mockstate::123456");
+        start(&f, creds).await;
+        assert_eq!(id, f.id);
+        wait_for(&mut f.rx, |s| s.state == ConnState::Connected).await;
+    }
+
+    /// The `NeedsCredentials` status that's published once the session
+    /// has fully ended carries no tunnel details.
+    fn f_session_gone(s: &Status) -> bool {
+        s.detail.is_none()
+    }
+
+    #[tokio::test]
+    async fn asks_for_a_key_passphrase_and_remembers_it_is_needed() {
+        let cfg = "client\nremote de-fra-02.example.net 1194\n<key>\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAA\n</key>\n";
+        let mut f = setup_with(cfg, None).await;
+        start(&f, Credentials::default()).await;
+        let s = wait_for(&mut f.rx, |s| s.state == ConnState::NeedsCredentials).await;
+        assert_eq!(s.request.unwrap().kind, InputKind::KeyPassphrase);
+        assert!(f.mgr.lock().await.profiles()[0].key_encrypted);
+
+        // Cancelling from the prompt disconnects.
+        assert!(f.mgr.lock().await.begin_disconnect().is_none());
+        assert_eq!(f.mgr.lock().await.status().state, ConnState::Disconnected);
+
+        let creds = Credentials {
+            key_passphrase: Some("secret".into()),
+            ..Default::default()
+        };
+        start(&f, creds).await;
+        wait_for(&mut f.rx, |s| s.state == ConnState::Connected).await;
+    }
+
+    #[tokio::test]
+    async fn live_challenge_keeps_the_session() {
+        let mut f = setup_with(
+            "client\nremote de-fra-02.example.net 1194\nauth-user-pass\n",
+            None,
+        )
+        .await;
+        let creds = Credentials {
+            username: "pending".into(),
+            password: "pw".into(),
+            ..Default::default()
+        };
+        start(&f, creds).await;
+        wait_for(&mut f.rx, |s| s.state == ConnState::NeedsCredentials).await;
+        assert!(f.mgr.lock().await.answer("42").unwrap().is_none());
+        wait_for(&mut f.rx, |s| s.state == ConnState::Connected).await;
+        assert!(f.mgr.lock().await.answer("again").is_err());
+    }
+
+    #[tokio::test]
+    async fn session_config_has_proxy_and_extra_options() {
+        let cfg = "client\nremote de-fra-02.example.net 1194\nsocks-proxy old.example 1080\n";
+        let f = setup_with(
+            cfg,
+            Some(Settings {
+                connection_proxy: tunnel_core::ConnectionProxy {
+                    kind: tunnel_core::ProxyKind::Http,
+                    host: "proxy.lan".into(),
+                    port: 3128,
+                    auth: true,
+                },
+                ..Settings::default()
+            }),
+        )
+        .await;
+        let mut m = f.mgr.lock().await;
+        m.update(
+            &f.id,
+            &ProfileEdit {
+                disable_dco: Some(true),
+                extra_directives: Some("mssfix 1400".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let l = m.launch(&f.id).unwrap();
+        assert!(!l.config.contains("old.example"));
+        assert!(l.config.contains("http-proxy proxy.lan 3128 auto\n"));
+        assert!(l.config.ends_with("mssfix 1400\n"));
+        assert!(l.disable_dco);
+        assert!(tunnel_core::ovpn::sanitize(&l.config).is_ok());
     }
 
     #[tokio::test]

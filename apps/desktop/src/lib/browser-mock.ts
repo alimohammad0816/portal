@@ -3,7 +3,7 @@
  * plain `pnpm dev` in a browser (no Tauri, no daemon). Lets you work on the
  * interface without root or a VPN server.
  */
-import type { DaemonInfo, ImportResult, Profile, Status } from "./types";
+import type { ConnectInput, DaemonInfo, ImportResult, Profile, ProfileEdit, Status } from "./types";
 import { defaultPrefs, defaultSettings, emptyStatus, type Prefs, type Settings as SettingsT } from "./types";
 
 type Handler = (payload: unknown) => void;
@@ -20,6 +20,7 @@ const profiles: Profile[] = [
   ["NL", "Amsterdam", "nl-ams-01.provider-a.net", "udp", 1194, "Provider A", "user_pass"],
   ["FI", "Helsinki", "fi-hel-03.provider-a.net", "tcp", 443, "Provider A", "user_pass"],
   ["TR", "Istanbul office", "vpn.office.example", "udp", 1194, "Work", "user_pass_challenge"],
+  ["SE", "Stockholm (key)", "se-sto-01.example.org", "udp", 1194, "Personal", "certificate"],
   ["CA", "Toronto", "ca-tor-02.example.org", "udp", 1194, "Personal", "certificate"],
   ["US", "New York", "us-nyc-07.example.org", "tcp", 443, "Personal", "certificate"],
 ].map(([country, name, host, proto, port, group, auth], i) => ({
@@ -35,12 +36,18 @@ const profiles: Profile[] = [
   source_file: `${(host as string).split(".")[0]}.ovpn`,
   imported_at: now() - 86400 * 3,
   last_connected_at: i === 0 ? now() - 3600 : i === 3 ? now() - 7200 : null,
+  key_encrypted: (name as string).includes("(key)"),
+  disable_dco: false,
+  extra_directives: "",
 }));
 
 let settings: SettingsT = { ...defaultSettings };
 let status: Status = { ...emptyStatus };
 let blockedAfterDrop = false;
+/** Keyring slots: profile id, `id:key`, `connection-proxy`. */
 const saved = new Set<string>();
+/** A dynamic challenge is waiting (username `challenge` acts it out). */
+let pendingChallenge: string | null = null;
 let prefs: Prefs = { ...defaultPrefs };
 
 function firewallFields(s: Status): Partial<Status> {
@@ -119,9 +126,16 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
     case "update_profile": {
       const p = profiles.find((x) => x.id === args.id);
       if (!p) throw "No such profile";
-      if (args.name) p.name = args.name as string;
-      if (args.group) p.group = args.group as string;
-      p.country = args.country === "-" ? null : ((args.country as string) || p.country);
+      const e = args.edit as ProfileEdit;
+      if (e.name) p.name = e.name;
+      if (e.group) p.group = e.group;
+      if (e.country !== undefined) p.country = e.country === "-" ? null : e.country || p.country;
+      if (e.disable_dco !== undefined) p.disable_dco = e.disable_dco;
+      if (e.extra_directives !== undefined) {
+        if (/^\s*(up|down|script-security|plugin)\b/m.test(e.extra_directives))
+          throw "Extra options: line 1: `up` is not allowed in imported profiles";
+        p.extra_directives = e.extra_directives.trim() ? e.extra_directives.trim() + "\n" : "";
+      }
       return { ...p };
     }
     case "remove_profile": {
@@ -132,12 +146,44 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
     case "connect": {
       const p = profiles.find((x) => x.id === args.id);
       if (!p) throw "No such profile";
-      if (args.username && args.remember) saved.add(p.id);
-      if (args.username && args.remember === false) saved.delete(p.id);
-      if (p.auth !== "certificate" && !args.username && !saved.has(p.id))
+      const input = (args.input ?? {}) as ConnectInput;
+      const keep = (slot: string, given: boolean) => {
+        if (given && args.remember) saved.add(slot);
+        if (given && args.remember === false) saved.delete(slot);
+      };
+      keep(p.id, !!input.username);
+      keep(`${p.id}:key`, !!input.key_passphrase);
+      keep("connection-proxy", !!input.proxy_username);
+      if (p.auth !== "certificate" && !input.username && !saved.has(p.id))
         throw "This profile needs a username and password.";
+      clearTimers();
+      if (p.key_encrypted && !input.key_passphrase && !saved.has(`${p.id}:key`)) {
+        setStatus({ ...emptyStatus, state: "needs_credentials", profile_id: p.id, request: { kind: "key_passphrase", message: null, echo: false } });
+        return null;
+      }
+      if (input.username === "challenge") {
+        pendingChallenge = p.id;
+        setStatus({
+          ...emptyStatus,
+          state: "needs_credentials",
+          profile_id: p.id,
+          request: { kind: "challenge", message: "Enter the code from your authenticator app", echo: true },
+        });
+        return null;
+      }
       p.last_connected_at = now();
       startSession(p.id);
+      return null;
+    }
+    case "answer_challenge": {
+      if (!pendingChallenge) throw "Nothing is waiting for an answer.";
+      const id = pendingChallenge;
+      pendingChallenge = null;
+      if (args.response !== "123456") {
+        setStatus({ ...emptyStatus, profile_id: id, error: "Authentication failed. Check your username and password." });
+        return null;
+      }
+      startSession(id);
       return null;
     }
     case "get_settings":
@@ -152,11 +198,18 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
     case "exit_info":
       await new Promise((r) => setTimeout(r, 400));
       return { ip: "185.107.56.12", country_code: "DE", city: "Frankfurt am Main", latitude: 50.11, longitude: 8.68 };
-    case "has_credentials":
-      return saved.has(args.id as string);
-    case "forget_credentials":
-      saved.delete(args.id as string);
+    case "saved_credentials": {
+      const id = args.id as string;
+      return { login: saved.has(id), key: saved.has(`${id}:key`), proxy: saved.has("connection-proxy") };
+    }
+    case "forget_credentials": {
+      const id = args.id as string;
+      const kind = args.kind as string | undefined;
+      if (!kind || kind === "login") saved.delete(id);
+      if (!kind || kind === "key") saved.delete(`${id}:key`);
+      if (kind === "proxy") saved.delete("connection-proxy");
       return null;
+    }
     case "list_apps":
       return [
         ["Firefox", "/usr/bin/firefox"],
@@ -186,6 +239,7 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
       setStatus({ ...emptyStatus, profile_id: status.profile_id, error: "The connection ended unexpectedly." });
       return null;
     case "disconnect":
+      pendingChallenge = null;
       blockedAfterDrop = false;
       clearTimers();
       setStatus({ state: "disconnecting" });

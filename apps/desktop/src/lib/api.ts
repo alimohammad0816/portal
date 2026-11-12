@@ -3,6 +3,7 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
 
 import { mockInvoke, mockListen } from "./browser-mock";
 import type {
+  ConnectInput,
   DaemonInfo,
   ExitInfo,
   ImportResult,
@@ -10,6 +11,8 @@ import type {
   Network,
   Prefs,
   Profile,
+  ProfileEdit,
+  SavedCredentials,
   Settings,
   Status,
   UpdateInfo,
@@ -37,13 +40,14 @@ export const api = {
   daemonInfo: () => invoke<DaemonInfo>("daemon_info"),
   listProfiles: () => invoke<Profile[]>("list_profiles"),
   importProfiles: (paths: string[]) => invoke<ImportResult>("import_profiles", { paths }),
-  updateProfile: (id: string, name: string, group: string, country: string) =>
-    invoke<Profile>("update_profile", { id, name, group, country }),
+  updateProfile: (id: string, edit: ProfileEdit) => invoke<Profile>("update_profile", { id, edit }),
   removeProfile: (id: string) => invoke<void>("remove_profile", { id }),
-  connect: (id: string, username = "", password = "", response = "", remember?: boolean, name?: string) =>
-    invoke<void>("connect", { id, username, password, response, remember, name }),
-  hasCredentials: (id: string) => invoke<boolean>("has_credentials", { id }),
-  forgetCredentials: (id: string) => invoke<void>("forget_credentials", { id }),
+  connect: (id: string, input?: ConnectInput, remember?: boolean, name?: string) =>
+    invoke<void>("connect", { id, input: input ?? {}, remember, name }),
+  answerChallenge: (response: string) => invoke<void>("answer_challenge", { response }),
+  savedCredentials: (id: string) => invoke<SavedCredentials>("saved_credentials", { id }),
+  forgetCredentials: (id: string, kind?: "login" | "key" | "proxy") =>
+    invoke<void>("forget_credentials", { id, kind }),
   disconnect: () => invoke<void>("disconnect"),
   getStatus: () => invoke<Status>("get_status"),
   getLog: () => invoke<string[]>("get_log"),

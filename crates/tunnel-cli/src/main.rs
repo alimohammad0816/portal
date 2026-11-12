@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use tunnel_core::ovpn;
 use tunnel_core::{
-    AuthKind, ConnState, DaemonProxy, DnsMode, FirewallMode, Profile, Settings, SplitApp,
-    SplitMode, SplitSettings, Status,
+    AuthKind, ConnState, DaemonProxy, DnsMode, FirewallMode, InputKind, Profile, ProfileEdit,
+    ProxyKind, Secrets, Settings, SplitApp, SplitMode, SplitSettings, Status,
 };
 
 #[derive(Parser)]
@@ -42,7 +42,7 @@ enum Cmd {
         #[arg(short, long)]
         watch: bool,
     },
-    /// Rename a profile or move it to another group.
+    /// Change a profile: name, group, country, DCO and extra options.
     Edit {
         profile: String,
         #[arg(long)]
@@ -52,12 +52,23 @@ enum Cmd {
         /// Two-letter country code, or `-` to clear it.
         #[arg(long)]
         country: Option<String>,
+        /// Data channel offload: `on` (OpenVPN's default) or `off`.
+        #[arg(long)]
+        dco: Option<String>,
+        /// Extra OpenVPN directive, e.g. `--extra 'mssfix 1400'`. Repeat for
+        /// more; replaces the profile's current extra options.
+        #[arg(long)]
+        extra: Vec<String>,
+        /// Remove all extra options.
+        #[arg(long, conflicts_with = "extra")]
+        clear_extra: bool,
     },
     /// Remove a profile.
     Remove { profile: String },
     /// Show or change settings, e.g.
     /// `tunnel settings firewall=always lan=off ipv6=on dns=1.1.1.1,9.9.9.9 dns-guard=on`.
-    /// `firewall` is off, auto or always; `dns` is `vpn` or a list of servers.
+    /// `firewall` is off, auto or always; `dns` is `vpn` or a list of servers;
+    /// `proxy` is `off`, `http://host:port` or `socks://host:port`.
     Settings { changes: Vec<String> },
     /// Split tunneling. With no arguments, shows the rules. Examples:
     /// `tunnel split on`, `tunnel split mode include`,
@@ -164,12 +175,27 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Connect { profile, username } => {
             let p = find(&d, &profile).await?;
-            let (user, pass, resp) = credentials(&p, username)?;
+            let st: Settings = serde_json::from_str(&d.get_settings().await?)?;
+            let mut secrets = credentials(&p, username, &st)?;
             let mut stream = d.receive_status_changed().await?;
-            d.connect(&p.id, &user, &pass, &resp).await?;
+            d.connect(&p.id, &serde_json::to_string(&secrets)?).await?;
             println!("connecting to {}…", p.name);
+            let mut shown_url = None;
+            // The waiting state can be published more than once; answer once.
+            let mut answered = false;
             while let Some(sig) = stream.next().await {
                 let s: Status = serde_json::from_str(sig.args()?.status())?;
+                if let Some(url) = &s.auth_url
+                    && shown_url.as_ref() != Some(url)
+                {
+                    println!("Sign in to continue: {url}");
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(url)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                    shown_url = Some(url.clone());
+                }
                 match s.state {
                     ConnState::Connected => {
                         println!("connected  {}", s.tunnel_ip.unwrap_or_default());
@@ -178,7 +204,38 @@ async fn run(cli: Cli) -> Result<()> {
                     ConnState::Disconnected => {
                         bail!(s.error.unwrap_or_else(|| "disconnected".into()))
                     }
-                    _ => {}
+                    ConnState::NeedsCredentials if answered => {}
+                    ConnState::NeedsCredentials => {
+                        let Some(req) = s.request else { continue };
+                        answered = true;
+                        match req.kind {
+                            InputKind::Challenge => {
+                                let text = req.message.as_deref().unwrap_or("Response");
+                                let answer = if req.echo {
+                                    ask(&format!("{text}: "))?
+                                } else {
+                                    rpassword::prompt_password(format!("{text}: "))?
+                                };
+                                d.answer_challenge(&answer).await?;
+                                continue;
+                            }
+                            InputKind::Login => {
+                                secrets.username = ask("Username: ")?;
+                                secrets.password = rpassword::prompt_password("Password: ")?;
+                            }
+                            InputKind::KeyPassphrase => {
+                                secrets.key_passphrase =
+                                    Some(rpassword::prompt_password("Private key passphrase: ")?);
+                            }
+                            InputKind::ProxyLogin => {
+                                secrets.proxy_username = Some(ask("Proxy username: ")?);
+                                secrets.proxy_password =
+                                    Some(rpassword::prompt_password("Proxy password: ")?);
+                            }
+                        }
+                        d.connect(&p.id, &serde_json::to_string(&secrets)?).await?;
+                    }
+                    _ => answered = false,
                 }
             }
         }
@@ -197,18 +254,33 @@ async fn run(cli: Cli) -> Result<()> {
             name,
             group,
             country,
+            dco,
+            extra,
+            clear_extra,
         } => {
             let p = find(&d, &profile).await?;
+            let edit = ProfileEdit {
+                name,
+                group,
+                country,
+                disable_dco: dco.as_deref().map(on_off).transpose()?.map(|on| !on),
+                extra_directives: if clear_extra {
+                    Some(String::new())
+                } else if extra.is_empty() {
+                    None
+                } else {
+                    Some(extra.join("\n"))
+                },
+            };
             let u: Profile = serde_json::from_str(
-                &d.update_profile(
-                    &p.id,
-                    name.as_deref().unwrap_or(""),
-                    group.as_deref().unwrap_or(""),
-                    country.as_deref().unwrap_or(""),
-                )
-                .await?,
+                &d.update_profile(&p.id, &serde_json::to_string(&edit)?)
+                    .await?,
             )?;
             println!("{}  {}  {}", short(&u.id), u.name, u.group);
+            println!("dco        {}", if u.disable_dco { "off" } else { "on" });
+            for line in u.extra_directives.lines() {
+                println!("extra      {line}");
+            }
         }
         Cmd::Remove { profile } => {
             let p = find(&d, &profile).await?;
@@ -313,30 +385,38 @@ async fn find(d: &DaemonProxy<'_>, query: &str) -> Result<Profile> {
     }
 }
 
-fn credentials(p: &Profile, username: Option<String>) -> Result<(String, String, String)> {
-    if p.auth == AuthKind::Certificate {
-        return Ok(Default::default());
-    }
-    let user = match username {
-        Some(u) => u,
-        None => {
-            print!("Username: ");
-            std::io::stdout().flush()?;
-            let mut s = String::new();
-            std::io::stdin().read_line(&mut s)?;
-            s.trim().to_string()
+fn ask(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut s = String::new();
+    std::io::stdin().read_line(&mut s)?;
+    Ok(s.trim().to_string())
+}
+
+/// Ask up front for what the profile and settings say we'll need.
+fn credentials(p: &Profile, username: Option<String>, st: &Settings) -> Result<Secrets> {
+    let mut out = Secrets::default();
+    if p.auth != AuthKind::Certificate {
+        out.username = match username {
+            Some(u) => u,
+            None => ask("Username: ")?,
+        };
+        out.password = rpassword::prompt_password("Password: ")?;
+        if p.auth == AuthKind::UserPassChallenge {
+            out.response = Some(rpassword::prompt_password(format!(
+                "{}: ",
+                p.challenge.as_deref().unwrap_or("Response")
+            ))?);
         }
-    };
-    let pass = rpassword::prompt_password("Password: ")?;
-    let resp = if p.auth == AuthKind::UserPassChallenge {
-        rpassword::prompt_password(format!(
-            "{}: ",
-            p.challenge.as_deref().unwrap_or("Response")
-        ))?
-    } else {
-        String::new()
-    };
-    Ok((user, pass, resp))
+    }
+    if p.key_encrypted {
+        out.key_passphrase = Some(rpassword::prompt_password("Private key passphrase: ")?);
+    }
+    if st.connection_proxy.active() && st.connection_proxy.auth {
+        out.proxy_username = Some(ask("Proxy username: ")?);
+        out.proxy_password = Some(rpassword::prompt_password("Proxy password: ")?);
+    }
+    Ok(out)
 }
 
 fn human(bytes: u64) -> String {
@@ -387,6 +467,17 @@ async fn print_status(d: &DaemonProxy<'_>, s: &Status) -> Result<()> {
             if s.internet_blocked {
                 println!("firewall: internet is blocked outside the VPN");
             }
+            if let Some(r) = &s.request {
+                println!(
+                    "waiting for: {}",
+                    match r.kind {
+                        InputKind::Login => "username and password",
+                        InputKind::KeyPassphrase => "private key passphrase",
+                        InputKind::ProxyLogin => "proxy username and password",
+                        InputKind::Challenge => r.message.as_deref().unwrap_or("an answer"),
+                    }
+                );
+            }
         }
     }
     if let Some(p) = &s.proxy_address {
@@ -423,6 +514,28 @@ fn apply_change(st: &mut Settings, change: &str) -> Result<()> {
         "gateway-port" => {
             st.proxy_gateway.port = value.parse().context("gateway-port is a number")?
         }
+        "proxy" => {
+            let cp = &mut st.connection_proxy;
+            if value == "off" {
+                cp.kind = ProxyKind::Profile;
+            } else {
+                let (kind, rest) = value
+                    .split_once("://")
+                    .context("proxy is off, http://host:port or socks://host:port")?;
+                cp.kind = match kind {
+                    "http" => ProxyKind::Http,
+                    "socks" | "socks5" => ProxyKind::Socks,
+                    _ => bail!("proxy is off, http://host:port or socks://host:port"),
+                };
+                let (host, port) = rest
+                    .trim_end_matches('/')
+                    .rsplit_once(':')
+                    .context("give the proxy's port, e.g. http://proxy.lan:3128")?;
+                cp.host = host.trim_matches(['[', ']']).to_string();
+                cp.port = port.parse().context("the proxy port is a number")?;
+            }
+        }
+        "proxy-auth" => st.connection_proxy.auth = on_off(value)?,
         "dns" => {
             st.dns = if value == "vpn" {
                 DnsMode::Vpn
@@ -431,7 +544,7 @@ fn apply_change(st: &mut Settings, change: &str) -> Result<()> {
             }
         }
         _ => bail!(
-            "unknown setting `{key}` (firewall, lan, ipv6, dns, dns-guard, gateway, gateway-port)"
+            "unknown setting `{key}` (firewall, lan, ipv6, dns, dns-guard, gateway, gateway-port, proxy, proxy-auth)"
         ),
     }
     Ok(())
@@ -464,6 +577,21 @@ fn print_settings(st: &Settings) {
         yn(st.proxy_gateway.enabled),
         st.proxy_gateway.port
     );
+    let cp = &st.connection_proxy;
+    match cp.kind {
+        ProxyKind::Profile => println!("proxy      off  (the profile's own, if any)"),
+        ProxyKind::Http | ProxyKind::Socks => println!(
+            "proxy      {}://{}:{}{}",
+            if cp.kind == ProxyKind::Http {
+                "http"
+            } else {
+                "socks"
+            },
+            cp.host,
+            cp.port,
+            if cp.auth { "  (with sign-in)" } else { "" }
+        ),
+    }
 }
 
 fn apply_split(sp: &mut SplitSettings, action: SplitCmd) -> Result<()> {

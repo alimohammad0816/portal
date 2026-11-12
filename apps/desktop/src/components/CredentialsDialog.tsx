@@ -5,150 +5,235 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import type { Profile } from "@/lib/api";
+import type { ConnectInput, Profile } from "@/lib/api";
 
-export interface Credentials {
-  /// Empty when the saved username and password should be used.
-  username: string;
-  password: string;
-  response: string;
-  remember?: boolean;
+/** Which fields to show. */
+export interface Ask {
+  login: boolean;
+  /** The profile's static challenge (OTP). */
+  otp: boolean;
+  key: boolean;
+  proxy: boolean;
 }
 
 export interface CredentialsRequest {
   profile: Profile;
-  /// The password is in the keyring; only the one-time code is needed.
-  otpOnly: boolean;
-  /// Shown above the fields, e.g. after a failed sign-in.
+  ask: Ask;
+  /** A question from the server, answered on its own. */
+  challenge?: { text: string; echo: boolean };
+  /** Shown above the fields, e.g. after a failed sign-in. */
   message?: string;
+  /** The service is waiting for this answer; cancelling disconnects. */
+  fromService?: boolean;
 }
 
-const userKey = (id: string) => `tunnel.username.${id}`;
+export const noAsk: Ask = { login: false, otp: false, key: false, proxy: false };
 
-function rememberedUsername(id: string): string {
+const userKey = (id: string) => `tunnel.username.${id}`;
+const proxyUserKey = "tunnel.proxy-username";
+
+function stored(key: string): string {
   try {
-    return localStorage.getItem(userKey(id)) ?? "";
+    return localStorage.getItem(key) ?? "";
   } catch {
     return "";
   }
 }
 
+function store(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable: fine, we just won't prefill next time */
+  }
+}
+
+function Field({
+  id,
+  label,
+  value,
+  onChange,
+  type = "text",
+  autoFocus,
+  autoComplete,
+  inputMode,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  type?: string;
+  autoFocus?: boolean;
+  autoComplete?: string;
+  inputMode?: "numeric" | "text";
+}) {
+  return (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>{label}</Label>
+      <Input
+        id={id}
+        type={type}
+        autoFocus={autoFocus}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        autoComplete={autoComplete}
+        inputMode={inputMode}
+      />
+    </div>
+  );
+}
+
+function title(r: CredentialsRequest): string {
+  const { ask, profile } = r;
+  if (r.challenge) return profile.name;
+  if (ask.login) return `Sign in to ${profile.name}`;
+  if (ask.key && !ask.proxy && !ask.otp) return "Unlock private key";
+  if (ask.proxy && !ask.key && !ask.otp) return "Proxy sign-in";
+  if (ask.otp && !ask.key && !ask.proxy) return profile.challenge ?? "One-time code";
+  return `Connect to ${profile.name}`;
+}
+
+function description(r: CredentialsRequest): string {
+  if (r.message) return r.message;
+  if (r.challenge) return "The server asks for one more step.";
+  const { ask, profile } = r;
+  if (ask.key && !ask.login && !ask.proxy) return `The private key of ${profile.name} is protected by a passphrase.`;
+  if (ask.proxy && !ask.login && !ask.key) return "The proxy you connect through asks for a username and password.";
+  if (ask.otp && !ask.login && !ask.key && !ask.proxy) return `Your saved password for ${profile.name} is used with this code.`;
+  return "Saved passwords are kept in your keyring, encrypted with your login.";
+}
+
 export function CredentialsDialog({
   request,
   onSubmit,
+  onAnswer,
   onCancel,
 }: {
   request: CredentialsRequest | null;
-  onSubmit: (c: Credentials) => void;
+  onSubmit: (input: ConnectInput, remember: boolean) => void;
+  onAnswer: (response: string) => void;
   onCancel: () => void;
 }) {
+  const ask = request?.ask ?? noAsk;
   const profile = request?.profile ?? null;
-  const otpOnly = request?.otpOnly ?? false;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [response, setResponse] = useState("");
+  const [key, setKey] = useState("");
+  const [proxyUser, setProxyUser] = useState("");
+  const [proxyPass, setProxyPass] = useState("");
   const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (profile) {
-      setUsername(rememberedUsername(profile.id));
-      setPassword("");
-      setResponse("");
-      setRemember(true);
-      setError(null);
-    }
-  }, [profile]);
+    if (!request) return;
+    setUsername(stored(userKey(request.profile.id)));
+    setPassword("");
+    setResponse("");
+    setKey("");
+    setProxyUser(stored(proxyUserKey));
+    setProxyPass("");
+    setRemember(true);
+    setError(null);
+  }, [request]);
 
-  const needsResponse = profile?.auth === "user_pass_challenge";
+  const edit = (set: (v: string) => void) => (v: string) => {
+    set(v);
+    setError(null);
+  };
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!profile) return;
-    if (!otpOnly && (!username.trim() || !password)) {
-      setError("Enter your username and password.");
+    if (!request || !profile) return;
+    if (request.challenge) {
+      if (!response.trim()) return setError("Enter your answer.");
+      onAnswer(response.trim());
       return;
     }
-    if (needsResponse && !response.trim()) {
-      setError(`Enter the ${profile.challenge ?? "response"}.`);
-      return;
-    }
-    if (otpOnly) {
-      onSubmit({ username: "", password: "", response: response.trim() });
-      return;
-    }
-    try {
-      localStorage.setItem(userKey(profile.id), username.trim());
-    } catch {
-      /* storage unavailable: fine, we just won't prefill next time */
-    }
-    onSubmit({ username: username.trim(), password, response: response.trim(), remember });
+    if (ask.login && (!username.trim() || !password)) return setError("Enter your username and password.");
+    if (ask.otp && !response.trim()) return setError(`Enter the ${profile.challenge ?? "response"}.`);
+    if (ask.key && !key) return setError("Enter the private key passphrase.");
+    if (ask.proxy && (!proxyUser.trim() || !proxyPass)) return setError("Enter the proxy's username and password.");
+    if (ask.login) store(userKey(profile.id), username.trim());
+    if (ask.proxy) store(proxyUserKey, proxyUser.trim());
+    onSubmit(
+      {
+        username: ask.login ? username.trim() : "",
+        password: ask.login ? password : "",
+        response: ask.otp ? response.trim() : "",
+        key_passphrase: ask.key ? key : "",
+        proxy_username: ask.proxy ? proxyUser.trim() : "",
+        proxy_password: ask.proxy ? proxyPass : "",
+      },
+      remember,
+    );
   }
 
+  const canRemember = !request?.challenge && (ask.login || ask.key || ask.proxy);
+  // Focus the first empty field.
+  const focus = ask.login ? (username ? "pass" : "user") : ask.otp ? "otp" : ask.key ? "key" : "proxy";
+
   return (
-    <Dialog open={profile !== null} onOpenChange={(open) => !open && onCancel()}>
+    <Dialog open={request !== null} onOpenChange={(open) => !open && onCancel()}>
       <DialogContent>
         <form onSubmit={submit} className="grid gap-4">
           <DialogHeader>
-            <DialogTitle>{otpOnly ? `${profile?.challenge ?? "One-time code"}` : `Sign in to ${profile?.name}`}</DialogTitle>
-            <DialogDescription>
-              {request?.message ??
-                (otpOnly
-                  ? `Your saved password for ${profile?.name} is used with this code.`
-                  : "Saved passwords are kept in your keyring, encrypted with your login.")}
-            </DialogDescription>
+            <DialogTitle>{request ? title(request) : ""}</DialogTitle>
+            <DialogDescription>{request ? description(request) : ""}</DialogDescription>
           </DialogHeader>
-          {!otpOnly && (
+          {request?.challenge ? (
+            <Field
+              id="cred-challenge"
+              label={request.challenge.text || "Response"}
+              type={request.challenge.echo ? "text" : "password"}
+              autoFocus
+              value={response}
+              onChange={edit(setResponse)}
+              autoComplete="one-time-code"
+            />
+          ) : (
             <>
-              <div className="grid gap-2">
-                <Label htmlFor="cred-user">Username</Label>
-                <Input
-                  id="cred-user"
-                  autoFocus={!username}
-                  value={username}
-                  onChange={(e) => {
-                    setUsername(e.target.value);
-                    setError(null);
-                  }}
-                  autoComplete="username"
+              {ask.login && (
+                <>
+                  <Field id="cred-user" label="Username" autoFocus={focus === "user"} value={username} onChange={edit(setUsername)} autoComplete="username" />
+                  <Field
+                    id="cred-pass"
+                    label="Password"
+                    type="password"
+                    autoFocus={focus === "pass"}
+                    value={password}
+                    onChange={edit(setPassword)}
+                    autoComplete="current-password"
+                  />
+                </>
+              )}
+              {ask.otp && (
+                <Field
+                  id="cred-resp"
+                  label={profile?.challenge ?? "Response"}
+                  inputMode="numeric"
+                  autoFocus={focus === "otp"}
+                  value={response}
+                  onChange={edit(setResponse)}
+                  autoComplete="one-time-code"
                 />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="cred-pass">Password</Label>
-                <Input
-                  id="cred-pass"
-                  type="password"
-                  autoFocus={!!username}
-                  value={password}
-                  onChange={(e) => {
-                    setPassword(e.target.value);
-                    setError(null);
-                  }}
-                  autoComplete="current-password"
-                />
-              </div>
+              )}
+              {ask.key && (
+                <Field id="cred-key" label="Private key passphrase" type="password" autoFocus={focus === "key"} value={key} onChange={edit(setKey)} autoComplete="off" />
+              )}
+              {ask.proxy && (
+                <div className="grid gap-3 rounded-lg border p-3">
+                  <span className="text-xs text-muted-foreground">Proxy</span>
+                  <Field id="cred-proxy-user" label="Username" autoFocus={focus === "proxy"} value={proxyUser} onChange={edit(setProxyUser)} autoComplete="off" />
+                  <Field id="cred-proxy-pass" label="Password" type="password" value={proxyPass} onChange={edit(setProxyPass)} autoComplete="off" />
+                </div>
+              )}
             </>
           )}
-          {needsResponse && (
-            <div className="grid gap-2">
-              <Label htmlFor="cred-resp">{profile?.challenge ?? "Response"}</Label>
-              <Input
-                id="cred-resp"
-                inputMode="numeric"
-                autoFocus={otpOnly}
-                value={response}
-                onChange={(e) => {
-                  setResponse(e.target.value);
-                  setError(null);
-                }}
-                autoComplete="one-time-code"
-              />
-            </div>
-          )}
-          {!otpOnly && (
+          {canRemember && (
             <div className="flex items-center justify-between gap-3">
               <Label htmlFor="cred-remember" className="text-[13px] font-normal">
-                Remember password
+                {ask.key && !ask.login && !ask.proxy ? "Remember passphrase" : "Remember in keyring"}
               </Label>
               <Switch id="cred-remember" checked={remember} onCheckedChange={setRemember} />
             </div>
@@ -158,7 +243,7 @@ export function CredentialsDialog({
             <Button type="button" variant="outline" onClick={onCancel}>
               Cancel
             </Button>
-            <Button type="submit">Connect</Button>
+            <Button type="submit">{request?.challenge ? "Continue" : "Connect"}</Button>
           </DialogFooter>
         </form>
       </DialogContent>

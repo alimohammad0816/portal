@@ -13,6 +13,42 @@ export interface Profile {
   source_file: string;
   imported_at: number;
   last_connected_at: number | null;
+  key_encrypted: boolean;
+  disable_dco: boolean;
+  extra_directives: string;
+}
+
+export interface ProfileEdit {
+  name?: string;
+  group?: string;
+  /** Two-letter code, or "-" to clear it. */
+  country?: string;
+  disable_dco?: boolean;
+  extra_directives?: string;
+}
+
+/** What the window collected; empty fields come from the keyring. */
+export interface ConnectInput {
+  username?: string;
+  password?: string;
+  response?: string;
+  key_passphrase?: string;
+  proxy_username?: string;
+  proxy_password?: string;
+}
+
+export interface SavedCredentials {
+  login: boolean;
+  key: boolean;
+  proxy: boolean;
+}
+
+export type InputKind = "login" | "key_passphrase" | "proxy_login" | "challenge";
+
+export interface InputRequest {
+  kind: InputKind;
+  message: string | null;
+  echo: boolean;
 }
 
 export type ConnState = "disconnected" | "connecting" | "needs_credentials" | "connected" | "disconnecting";
@@ -36,6 +72,8 @@ export interface Status {
   split_needs_reconnect: boolean;
   split_processes: number;
   proxy_address: string | null;
+  request: InputRequest | null;
+  auth_url: string | null;
 }
 
 export type SplitMode = "exclude" | "include";
@@ -71,6 +109,16 @@ export interface Settings {
   dns_leak_protection: boolean;
   split: SplitSettings;
   proxy_gateway: { enabled: boolean; port: number };
+  connection_proxy: ConnectionProxy;
+}
+
+export type ProxyKind = "profile" | "http" | "socks";
+
+export interface ConnectionProxy {
+  kind: ProxyKind;
+  host: string;
+  port: number;
+  auth: boolean;
 }
 
 export const defaultSettings: Settings = {
@@ -81,6 +129,7 @@ export const defaultSettings: Settings = {
   dns_leak_protection: true,
   split: { enabled: false, mode: "exclude", apps: [], hosts: [], countries: [] },
   proxy_gateway: { enabled: false, port: 1080 },
+  connection_proxy: { kind: "profile", host: "", port: 8080, auth: false },
 };
 
 export interface ImportResult {
@@ -131,6 +180,8 @@ export const emptyStatus: Status = {
   split_needs_reconnect: false,
   split_processes: 0,
   proxy_address: null,
+  request: null,
+  auth_url: null,
 };
 
 export interface Prefs {

@@ -18,7 +18,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
 use tokio::sync::Mutex;
 use tunnel_core::ovpn;
-use tunnel_core::{ConnState, DaemonProxy, Profile, Settings, Status};
+use tunnel_core::{ConnState, DaemonProxy, Profile, ProfileEdit, Secrets, Settings, Status};
 
 /// Which bus the daemon lives on. `TUNNEL_SESSION_BUS=1` selects the
 /// session bus, for running against `tunneld --session --mock`.
@@ -129,7 +129,23 @@ async fn import_profiles(
         imported: Vec::new(),
         errors: Vec::new(),
     };
+    let mut files = Vec::new();
     for raw in paths {
+        let path = PathBuf::from(&raw);
+        if path.is_dir() {
+            let found = profiles_in(&path);
+            if found.is_empty() {
+                out.errors.push(ImportError {
+                    file: raw.clone(),
+                    message: "No OpenVPN profiles in this folder.".into(),
+                });
+            }
+            files.extend(found.into_iter().map(|p| p.display().to_string()));
+        } else {
+            files.push(raw);
+        }
+    }
+    for raw in files {
         let path = PathBuf::from(&raw);
         let file = path
             .file_name()
@@ -155,19 +171,58 @@ async fn import_profiles(
     Ok(out)
 }
 
+/// OpenVPN profiles in a folder (and one level of subfolders, as provider
+/// downloads often have), sorted by name. `.conf` files count only if they
+/// look like client configs.
+fn profiles_in(dir: &std::path::Path) -> Vec<PathBuf> {
+    fn scan(dir: &std::path::Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            if out.len() >= 500 {
+                return;
+            }
+            if p.is_dir() {
+                if depth > 0 {
+                    scan(&p, depth - 1, out);
+                }
+                continue;
+            }
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            let wanted = match ext.as_deref() {
+                Some("ovpn") => true,
+                Some("conf") => std::fs::read_to_string(&p)
+                    .is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with("remote "))),
+                _ => false,
+            };
+            if wanted {
+                out.push(p);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    scan(dir, 1, &mut out);
+    out
+}
+
 #[tauri::command]
 async fn update_profile(
     daemon: State<'_, Daemon>,
     id: String,
-    name: String,
-    group: String,
-    country: String,
+    edit: ProfileEdit,
 ) -> Result<Profile, String> {
+    let edit = serde_json::to_string(&edit).map_err(|e| e.to_string())?;
     parse(
         daemon
             .get()
             .await?
-            .update_profile(&id, &name, &group, &country)
+            .update_profile(&id, &edit)
             .await
             .map_err(err)?,
     )
@@ -178,58 +233,147 @@ async fn remove_profile(daemon: State<'_, Daemon>, id: String) -> Result<(), Str
     daemon.get().await?.remove_profile(&id).await.map_err(err)
 }
 
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-async fn connect(
-    daemon: State<'_, Daemon>,
-    id: String,
+/// What the window collected; empty fields come from the keyring.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct ConnectInput {
     username: String,
     password: String,
     response: String,
+    key_passphrase: String,
+    proxy_username: String,
+    proxy_password: String,
+}
+
+/// Fill in what wasn't typed from the keyring, and save what was (if asked
+/// to). Secrets go from the keyring straight to the service, never through
+/// the web view.
+async fn secrets_for(id: &str, name: &str, input: ConnectInput, remember: Option<bool>) -> Secrets {
+    let opt = |s: String| (!s.is_empty()).then_some(s);
+    let mut out = Secrets {
+        response: opt(input.response),
+        ..Default::default()
+    };
+
+    if input.username.is_empty() {
+        if let Ok(Some(s)) = keyring::load(&keyring::login_slot(id)).await {
+            out.username = s.username;
+            out.password = s.password;
+        }
+    } else {
+        out.username = input.username;
+        out.password = input.password;
+        let saved = keyring::Saved {
+            username: out.username.clone(),
+            password: out.password.clone(),
+        };
+        keep(&keyring::login_slot(id), name, &saved, remember).await;
+    }
+
+    if input.key_passphrase.is_empty() {
+        if let Ok(Some(s)) = keyring::load(&keyring::key_slot(id)).await {
+            out.key_passphrase = Some(s.password);
+        }
+    } else {
+        let saved = keyring::Saved {
+            username: String::new(),
+            password: input.key_passphrase.clone(),
+        };
+        keep(
+            &keyring::key_slot(id),
+            &format!("{name} (key)"),
+            &saved,
+            remember,
+        )
+        .await;
+        out.key_passphrase = Some(input.key_passphrase);
+    }
+
+    if input.proxy_username.is_empty() {
+        if let Ok(Some(s)) = keyring::load(keyring::PROXY_SLOT).await {
+            out.proxy_username = Some(s.username);
+            out.proxy_password = Some(s.password);
+        }
+    } else {
+        let saved = keyring::Saved {
+            username: input.proxy_username.clone(),
+            password: input.proxy_password.clone(),
+        };
+        keep(keyring::PROXY_SLOT, "proxy", &saved, remember).await;
+        out.proxy_username = Some(input.proxy_username);
+        out.proxy_password = Some(input.proxy_password);
+    }
+    out
+}
+
+async fn keep(slot: &str, name: &str, saved: &keyring::Saved, remember: Option<bool>) {
+    match remember {
+        Some(true) => {
+            if let Err(e) = keyring::save(slot, name, saved).await {
+                eprintln!("keyring: {e}");
+            }
+        }
+        Some(false) => {
+            let _ = keyring::forget(slot).await;
+        }
+        None => {}
+    }
+}
+
+#[tauri::command]
+async fn connect(
+    daemon: State<'_, Daemon>,
+    id: String,
+    input: Option<ConnectInput>,
     remember: Option<bool>,
     name: Option<String>,
 ) -> Result<(), String> {
-    // No username: use the saved one, if any. The password goes from the
-    // keyring straight to the service, never through the web view.
-    let (username, password) = if username.is_empty() {
-        match keyring::load(&id).await {
-            Ok(Some(s)) => (s.username, s.password),
-            _ => (String::new(), String::new()),
-        }
-    } else {
-        match remember {
-            Some(true) => {
-                let saved = keyring::Saved {
-                    username: username.clone(),
-                    password: password.clone(),
-                };
-                if let Err(e) = keyring::save(&id, name.as_deref().unwrap_or(&id), &saved).await {
-                    eprintln!("keyring: {e}");
-                }
-            }
-            Some(false) => {
-                let _ = keyring::forget(&id).await;
-            }
-            None => {}
-        }
-        (username, password)
-    };
+    let name = name.unwrap_or_else(|| id.clone());
+    let secrets = secrets_for(&id, &name, input.unwrap_or_default(), remember).await;
+    let json = serde_json::to_string(&secrets).map_err(|e| e.to_string())?;
+    daemon.get().await?.connect(&id, &json).await.map_err(err)
+}
+
+#[tauri::command]
+async fn answer_challenge(daemon: State<'_, Daemon>, response: String) -> Result<(), String> {
     daemon
         .get()
         .await?
-        .connect(&id, &username, &password, &response)
+        .answer_challenge(&response)
         .await
         .map_err(err)
 }
 
-#[tauri::command]
-async fn has_credentials(id: String) -> bool {
-    keyring::has(&id).await
+#[derive(Serialize)]
+struct SavedCredentials {
+    login: bool,
+    key: bool,
+    proxy: bool,
 }
 
 #[tauri::command]
-async fn forget_credentials(id: String) -> Result<(), String> {
-    keyring::forget(&id).await.map_err(|e| e.to_string())
+async fn saved_credentials(id: String) -> SavedCredentials {
+    SavedCredentials {
+        login: keyring::has(&keyring::login_slot(&id)).await,
+        key: keyring::has(&keyring::key_slot(&id)).await,
+        proxy: keyring::has(keyring::PROXY_SLOT).await,
+    }
+}
+
+/// Forget saved secrets: `login`, `key`, `proxy`, or (no kind) everything
+/// saved for the profile.
+#[tauri::command]
+async fn forget_credentials(id: String, kind: Option<String>) -> Result<(), String> {
+    let slots = match kind.as_deref() {
+        Some("login") => vec![keyring::login_slot(&id)],
+        Some("key") => vec![keyring::key_slot(&id)],
+        Some("proxy") => vec![keyring::PROXY_SLOT.to_string()],
+        _ => vec![keyring::login_slot(&id), keyring::key_slot(&id)],
+    };
+    for slot in slots {
+        keyring::forget(&slot).await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -378,17 +522,26 @@ async fn auto_connect(app: &AppHandle, profile: Option<String>, why: &str) {
         .or_else(|| profiles.first());
     let Some(p) = chosen else { return };
     eprintln!("auto-connect to {} ({why})", p.name);
-    let result = match p.auth {
-        tunnel_core::AuthKind::Certificate => d.connect(&p.id, "", "", "").await.map_err(err),
-        tunnel_core::AuthKind::UserPass => match keyring::load(&p.id).await {
-            Ok(Some(s)) => d
-                .connect(&p.id, &s.username, &s.password, "")
-                .await
-                .map_err(err),
-            _ => Err("needs credentials".into()),
-        },
+    let settings: Settings = d
+        .get_settings()
+        .await
+        .map_err(err)
+        .and_then(parse)
+        .unwrap_or_default();
+    let secrets = secrets_for(&p.id, &p.name, ConnectInput::default(), None).await;
+    let complete = match p.auth {
+        tunnel_core::AuthKind::Certificate => true,
+        tunnel_core::AuthKind::UserPass => !secrets.username.is_empty(),
         // A one-time code can't be automated.
-        tunnel_core::AuthKind::UserPassChallenge => Err("needs credentials".into()),
+        tunnel_core::AuthKind::UserPassChallenge => false,
+    } && (!p.key_encrypted || secrets.key_passphrase.is_some())
+        && (!(settings.connection_proxy.active() && settings.connection_proxy.auth)
+            || secrets.proxy_username.is_some());
+    let result = if complete {
+        let json = serde_json::to_string(&secrets).unwrap_or_default();
+        d.connect(&p.id, &json).await.map_err(err)
+    } else {
+        Err("needs credentials".to_string())
     };
     if result.is_err() {
         show_main(app);
@@ -612,6 +765,8 @@ async fn pump_events(app: AppHandle) {
             }
             let mut names = profile_names(&d).await;
             update_tray(&app, &initial, initial.profile_id.as_ref().and_then(|id| names.get(id)).map(String::as_str));
+            let mut opened_url: Option<String> = None;
+            let mut asked = false;
 
             loop {
                 tokio::select! {
@@ -622,6 +777,24 @@ async fn pump_events(app: AppHandle) {
                             names = profile_names(&d).await;
                         }
                         update_tray(&app, &s, s.profile_id.as_ref().and_then(|id| names.get(id)).map(String::as_str));
+                        // The server wants a web sign-in: open it once.
+                        if let Some(url) = &s.auth_url
+                            && opened_url.as_ref() != Some(url)
+                            && (url.starts_with("https://") || url.starts_with("http://"))
+                        {
+                            use tauri_plugin_opener::OpenerExt;
+                            if let Err(e) = app.opener().open_url(url, None::<&str>) {
+                                eprintln!("opening sign-in page: {e}");
+                            }
+                            opened_url = Some(url.clone());
+                        }
+                        // Something to ask: bring the window up, even if
+                        // the connection started from the tray or at login.
+                        let asking = s.state == ConnState::NeedsCredentials && s.request.is_some();
+                        if asking && !asked {
+                            show_main(&app);
+                        }
+                        asked = asking;
                         let _ = app.emit("tunnel://status", s);
                     }
                     Some(sig) = settings.next() => {
@@ -725,8 +898,9 @@ pub fn run() {
             set_prefs,
             current_network,
             exit_info,
-            has_credentials,
+            saved_credentials,
             forget_credentials,
+            answer_challenge,
             probe_latency,
         ])
         .setup(|app| {
@@ -774,6 +948,30 @@ mod tests {
         assert_eq!(r.info.city.as_deref(), Some("Frankfurt am Main"));
         let r: ExitResp = serde_json::from_str(r#"{"success":false,"ip":""}"#).unwrap();
         assert!(!r.success);
+    }
+
+    #[test]
+    fn finds_profiles_in_folders() {
+        let dir = std::env::temp_dir().join(format!("tunnel-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mk = |rel: &str, text: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        mk("b.ovpn", "remote b\n");
+        mk("a.OVPN", "remote a\n");
+        mk("sub/c.ovpn", "remote c\n");
+        mk("client.conf", "client\nremote d 1194\n");
+        mk("nginx.conf", "server {}\n");
+        mk("notes.txt", "remote x\n");
+        mk("too/deep/e.ovpn", "remote e\n");
+        let names: Vec<String> = profiles_in(&dir)
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().display().to_string())
+            .collect();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(names, ["a.OVPN", "b.ovpn", "client.conf", "sub/c.ovpn"]);
     }
 
     #[test]

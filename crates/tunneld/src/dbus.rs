@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use tunnel_core::Settings;
 use tunnel_core::names::{ACTION_CONNECT, ACTION_MANAGE_PROFILES, ACTION_SETTINGS, ACTION_UPDATE};
+use tunnel_core::{ProfileEdit, Settings};
 use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::Value;
@@ -46,6 +46,24 @@ fn to_json<T: serde::Serialize>(v: &T) -> fdo::Result<String> {
 }
 
 impl DaemonIface {
+    /// Stop the old session (without holding the lock) and start the new one.
+    async fn connect_with(&self, id: &str, creds: Credentials) -> fdo::Result<()> {
+        let old = self
+            .mgr
+            .lock()
+            .await
+            .begin_connect(id, &creds)
+            .map_err(failed)?;
+        if let Some(old) = old {
+            old.stop().await;
+        }
+        self.mgr
+            .lock()
+            .await
+            .finish_connect(id, creds)
+            .map_err(failed)
+    }
+
     async fn authorize(
         &self,
         conn: &Connection,
@@ -104,17 +122,12 @@ impl DaemonIface {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
         id: String,
-        name: String,
-        group: String,
-        country: String,
+        edit: String,
     ) -> fdo::Result<String> {
         self.authorize(conn, &hdr, ACTION_MANAGE_PROFILES).await?;
-        let p = self
-            .mgr
-            .lock()
-            .await
-            .update(&id, &name, &group, &country)
-            .map_err(failed)?;
+        let edit: ProfileEdit =
+            serde_json::from_str(&edit).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        let p = self.mgr.lock().await.update(&id, &edit).map_err(failed)?;
         to_json(&p)
     }
 
@@ -133,30 +146,37 @@ impl DaemonIface {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
         id: String,
-        username: String,
-        password: String,
+        secrets: String,
+    ) -> fdo::Result<()> {
+        self.authorize(conn, &hdr, ACTION_CONNECT).await?;
+        let mut creds: Credentials =
+            serde_json::from_str(&secrets).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        // Empty strings from simple clients mean "not given".
+        for field in [
+            &mut creds.response,
+            &mut creds.key_passphrase,
+            &mut creds.proxy_username,
+            &mut creds.proxy_password,
+        ] {
+            if field.as_deref() == Some("") {
+                *field = None;
+            }
+        }
+        self.connect_with(&id, creds).await
+    }
+
+    async fn answer_challenge(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
         response: String,
     ) -> fdo::Result<()> {
         self.authorize(conn, &hdr, ACTION_CONNECT).await?;
-        let creds = Credentials {
-            username,
-            password,
-            response: (!response.is_empty()).then_some(response),
-        };
-        let old = self
-            .mgr
-            .lock()
-            .await
-            .begin_connect(&id, &creds)
-            .map_err(failed)?;
-        if let Some(old) = old {
-            old.stop().await;
+        let restart = self.mgr.lock().await.answer(&response).map_err(failed)?;
+        match restart {
+            Some((id, creds)) => self.connect_with(&id, creds).await,
+            None => Ok(()),
         }
-        self.mgr
-            .lock()
-            .await
-            .finish_connect(&id, creds)
-            .map_err(failed)
     }
 
     async fn disconnect(

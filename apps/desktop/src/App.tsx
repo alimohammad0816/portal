@@ -1,6 +1,7 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowUpCircle,
   Download,
@@ -14,9 +15,9 @@ import {
   SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { type Credentials, CredentialsDialog, type CredentialsRequest } from "@/components/CredentialsDialog";
+import { type Ask, CredentialsDialog, type CredentialsRequest, noAsk } from "@/components/CredentialsDialog";
 import { type Latency, LocationList } from "@/components/LocationList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sparkline } from "@/components/Sparkline";
@@ -27,6 +28,7 @@ import { UpdateDialog } from "@/components/UpdateDialog";
 import { WorldMap } from "@/components/WorldMap";
 import {
   api,
+  type ConnectInput,
   type DaemonInfo,
   defaultPrefs,
   defaultSettings,
@@ -178,10 +180,17 @@ export function App() {
     const subs = [
       onStatus((s) => {
         setStatus(s);
-        // A saved password that the server rejects is useless: drop it so
-        // the next attempt asks.
-        if (s.error?.includes("Authentication failed") && s.profile_id) {
-          api.forgetCredentials(s.profile_id).catch(() => {});
+        // A saved secret that's rejected is useless: drop it so the next
+        // attempt asks.
+        if (s.profile_id && s.error) {
+          const kind = s.error.includes("Authentication failed")
+            ? "login"
+            : s.error.includes("passphrase is wrong")
+              ? "key"
+              : s.error.includes("proxy rejected")
+                ? "proxy"
+                : null;
+          if (kind) api.forgetCredentials(s.profile_id, kind).catch(() => {});
         }
         if (s.state === "connected") {
           setRates((r) => ({ rx: [...r.rx, s.rate_in].slice(-HISTORY), tx: [...r.tx, s.rate_out].slice(-HISTORY) }));
@@ -204,6 +213,29 @@ export function App() {
       subs.forEach((p) => p.then((un) => un()));
     };
   }, [refreshAll]);
+
+  // The service is waiting for something (a key passphrase, the proxy's
+  // password, an answer to the server's question): ask.
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
+  const requestKey = status.state === "needs_credentials" && status.request ? `${status.profile_id}:${status.request.kind}:${status.request.message}` : null;
+  useEffect(() => {
+    if (!requestKey || !status.request) return;
+    const p = profilesRef.current.find((x) => x.id === status.profile_id);
+    if (!p) return;
+    const r = status.request;
+    if (r.kind === "challenge") {
+      setCredsFor({ profile: p, ask: noAsk, challenge: { text: r.message ?? "", echo: r.echo }, fromService: true });
+    } else {
+      const ask: Ask = { ...noAsk, login: r.kind === "login", key: r.kind === "key_passphrase", proxy: r.kind === "proxy_login" };
+      setCredsFor({ profile: p, ask, fromService: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestKey]);
+  useEffect(() => {
+    // The request went away (answered elsewhere, timed out, disconnected).
+    if (!requestKey) setCredsFor((c) => (c?.fromService ? null : c));
+  }, [requestKey]);
 
   // The app tried to connect by itself (login, untrusted network) and
   // needs a password or one-time code.
@@ -301,6 +333,15 @@ export function App() {
     };
   }, [importPaths]);
 
+  async function pickFolder() {
+    if (!inTauri) {
+      setNotice("Importing needs the desktop app.");
+      return;
+    }
+    const picked = await openDialog({ multiple: false, directory: true });
+    if (picked) importPaths(Array.isArray(picked) ? picked : [picked]);
+  }
+
   async function pickFiles() {
     if (!inTauri) {
       setNotice("Importing needs the desktop app.");
@@ -323,24 +364,33 @@ export function App() {
     (active ? status.profile_id : null) ?? pickedId ?? status.profile_id ?? recentProfile?.id ?? null;
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
 
-  async function doConnect(p: Profile, c?: Credentials) {
+  async function doConnect(p: Profile, input?: ConnectInput, remember?: boolean) {
     setNotice(null);
     try {
-      await api.connect(p.id, c?.username ?? "", c?.password ?? "", c?.response ?? "", c?.remember, p.name);
+      await api.connect(p.id, input, remember, p.name);
     } catch (e) {
       const msg = errorText(e);
       // Nothing saved after all (or the keyring is locked): ask.
-      if (!c?.username && msg.includes("needs a username")) setCredsFor({ profile: p, otpOnly: false });
+      if (!input?.username && msg.includes("needs a username"))
+        setCredsFor({ profile: p, ask: { ...noAsk, login: true, otp: p.auth === "user_pass_challenge" } });
       else setNotice(msg);
     }
   }
 
+  /** Ask up front for whatever isn't saved, then connect. */
   async function connectTo(p: Profile) {
     setPickedId(p.id);
-    if (p.auth === "certificate") return doConnect(p);
-    const saved = await api.hasCredentials(p.id).catch(() => false);
-    if (saved && p.auth === "user_pass") return doConnect(p);
-    setCredsFor({ profile: p, otpOnly: saved });
+    const proxyAuth = settings.connection_proxy.kind !== "profile" && settings.connection_proxy.auth;
+    const needsSaved = p.auth !== "certificate" || p.key_encrypted || proxyAuth;
+    const saved = needsSaved ? await api.savedCredentials(p.id).catch(() => ({ login: false, key: false, proxy: false })) : null;
+    const ask: Ask = {
+      login: p.auth !== "certificate" && !saved?.login,
+      otp: p.auth === "user_pass_challenge",
+      key: p.key_encrypted && !saved?.key,
+      proxy: proxyAuth && !saved?.proxy,
+    };
+    if (!ask.login && !ask.otp && !ask.key && !ask.proxy) return doConnect(p);
+    setCredsFor({ profile: p, ask });
   }
 
   async function changePrefs(next: Prefs) {
@@ -556,6 +606,15 @@ export function App() {
         </div>
       )}
 
+      {status.auth_url && status.state !== "connected" && status.state !== "disconnected" && (
+        <div className="mx-4 mt-2 flex items-center gap-3 rounded-lg border px-3 py-2.5">
+          <span className="flex-1 text-xs leading-5 text-muted-foreground">Finish signing in on the page that opened in your browser.</span>
+          <Button size="sm" variant="outline" onClick={() => openUrl(status.auth_url!).catch((e) => setNotice(errorText(e)))}>
+            Open again
+          </Button>
+        </div>
+      )}
+
       {status.split_needs_reconnect && live && (
         <div className="mx-4 mt-2 flex items-center gap-3 rounded-lg border px-3 py-2.5">
           <span className="flex-1 text-xs leading-5 text-muted-foreground">
@@ -638,7 +697,7 @@ export function App() {
           {daemon && !daemon.reachable ? (
             <DaemonDown info={daemon} onRetry={() => refreshAll().catch(() => {})} />
           ) : profiles.length === 0 ? (
-            <EmptyState onImport={pickFiles} />
+            <EmptyState onImport={pickFiles} onImportFolder={pickFolder} />
           ) : visible.length === 0 ? (
             <p className="px-3 py-8 text-center text-[13px] text-muted-foreground">
               {tab === "favorites" ? "Star a location to keep it here." : tab === "recent" ? "Locations you connect to show up here." : "No locations match your search."}
@@ -660,17 +719,25 @@ export function App() {
         <div className="pointer-events-none absolute inset-2 flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-ring bg-background/90">
           <FileUp className="size-6 text-muted-foreground" />
           <span className="text-sm font-medium">Drop to import</span>
-          <span className="text-xs text-muted-foreground">.ovpn and .conf files</span>
+          <span className="text-xs text-muted-foreground">.ovpn and .conf files, or a folder of them</span>
         </div>
       )}
 
       <CredentialsDialog
         request={credsFor}
-        onCancel={() => setCredsFor(null)}
-        onSubmit={(c) => {
+        onCancel={() => {
+          const fromService = credsFor?.fromService;
+          setCredsFor(null);
+          if (fromService) disconnect();
+        }}
+        onSubmit={(input, remember) => {
           const p = credsFor?.profile;
           setCredsFor(null);
-          if (p) doConnect(p, c);
+          if (p) doConnect(p, input, remember);
+        }}
+        onAnswer={(response) => {
+          setCredsFor(null);
+          api.answerChallenge(response).catch((e) => setNotice(errorText(e)));
         }}
       />
       <SettingsDialog
@@ -679,6 +746,8 @@ export function App() {
         profiles={profiles}
         log={log}
         onProfilesChanged={refreshProfiles}
+        onImportFiles={pickFiles}
+        onImportFolder={pickFolder}
         settings={settings}
         status={status}
         onSettingsChange={changeSettings}
@@ -754,7 +823,7 @@ function authLabel(p: Profile): string {
   return p.auth === "certificate" ? "Certificate" : p.auth === "user_pass" ? "Password" : "Password + OTP";
 }
 
-function EmptyState({ onImport }: { onImport: () => void }) {
+function EmptyState({ onImport, onImportFolder }: { onImport: () => void; onImportFolder: () => void }) {
   return (
     <div className="mx-2 mt-3 flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-8 text-center">
       <div className="flex size-10 items-center justify-center rounded-lg border bg-subtle text-muted-foreground">
@@ -762,11 +831,16 @@ function EmptyState({ onImport }: { onImport: () => void }) {
       </div>
       <div className="grid gap-1">
         <span className="text-sm font-medium">Import your first profile</span>
-        <span className="text-xs text-muted-foreground">Drop .ovpn files here, or pick them from disk.</span>
+        <span className="text-xs text-muted-foreground">Drop .ovpn files or a folder here, or pick them from disk.</span>
       </div>
-      <Button size="sm" onClick={onImport}>
-        Import
-      </Button>
+      <div className="flex gap-2">
+        <Button size="sm" onClick={onImport}>
+          Import files
+        </Button>
+        <Button size="sm" variant="outline" onClick={onImportFolder}>
+          Import folder
+        </Button>
+      </div>
     </div>
   );
 }

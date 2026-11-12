@@ -46,6 +46,83 @@ pub struct Profile {
     pub imported_at: u64,
     /// Unix seconds of the last successful connection.
     pub last_connected_at: Option<u64>,
+    /// The private key is protected by a passphrase.
+    #[serde(default)]
+    pub key_encrypted: bool,
+    /// Run without OpenVPN's kernel data channel offload (DCO).
+    #[serde(default)]
+    pub disable_dco: bool,
+    /// Extra OpenVPN directives, one per line, added after the profile's
+    /// own. Checked with [`crate::ovpn::sanitize_extra`].
+    #[serde(default)]
+    pub extra_directives: String,
+}
+
+/// Changes to a profile; `None` leaves a field as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileEdit {
+    pub name: Option<String>,
+    pub group: Option<String>,
+    /// Two-letter code, or `-` to clear it.
+    pub country: Option<String>,
+    pub disable_dco: Option<bool>,
+    pub extra_directives: Option<String>,
+}
+
+/// Everything a connection may need from the user. Empty fields mean
+/// "not given"; OpenVPN asks for what it needs, and the daemon reports a
+/// [`InputRequest`] when something is missing.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Secrets {
+    pub username: String,
+    pub password: String,
+    /// Static challenge response (OTP), if the profile has one.
+    pub response: Option<String>,
+    /// Passphrase of the profile's private key.
+    pub key_passphrase: Option<String>,
+    /// Sign-in for the proxy the connection goes through.
+    pub proxy_username: Option<String>,
+    pub proxy_password: Option<String>,
+}
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = |o: &Option<String>| o.as_ref().map(|_| "<set>");
+        f.debug_struct("Secrets")
+            .field("username", &self.username)
+            .field("password", &(!self.password.is_empty()).then_some("<set>"))
+            .field("response", &set(&self.response))
+            .field("key_passphrase", &set(&self.key_passphrase))
+            .field("proxy_username", &self.proxy_username)
+            .field("proxy_password", &set(&self.proxy_password))
+            .finish()
+    }
+}
+
+/// What the connection is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputKind {
+    /// Username and password.
+    Login,
+    /// The private key's passphrase.
+    KeyPassphrase,
+    /// Username and password for the proxy.
+    ProxyLogin,
+    /// An answer to a question from the server (`message`), sent with
+    /// `AnswerChallenge`.
+    Challenge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputRequest {
+    pub kind: InputKind,
+    /// Text from the server, for challenges.
+    pub message: Option<String>,
+    /// The answer may be shown while typing (not a secret).
+    pub echo: bool,
 }
 
 /// Connection state machine as reported to clients.
@@ -105,6 +182,67 @@ pub struct Status {
     /// Where the proxy gateway listens (`192.168.1.50:1080`) while it runs.
     #[serde(default)]
     pub proxy_address: Option<String>,
+    /// With `state` = `needs_credentials`: what to ask the user for.
+    #[serde(default)]
+    pub request: Option<InputRequest>,
+    /// The server wants you to sign in on a web page (SSO).
+    #[serde(default)]
+    pub auth_url: Option<String>,
+}
+
+/// How OpenVPN reaches the server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyKind {
+    /// Directly, or through whatever proxy the profile names.
+    #[default]
+    Profile,
+    Http,
+    Socks,
+}
+
+/// Connect to VPN servers through a proxy (e.g. on networks that only
+/// allow web traffic). The proxy's password, if any, comes with each
+/// connect and is never stored by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConnectionProxy {
+    pub kind: ProxyKind,
+    pub host: String,
+    pub port: u16,
+    /// The proxy asks for a username and password.
+    pub auth: bool,
+}
+
+impl Default for ConnectionProxy {
+    fn default() -> Self {
+        Self {
+            kind: ProxyKind::Profile,
+            host: String::new(),
+            port: 8080,
+            auth: false,
+        }
+    }
+}
+
+impl ConnectionProxy {
+    pub fn active(&self) -> bool {
+        self.kind != ProxyKind::Profile
+    }
+
+    /// Directives that send the connection through this proxy.
+    pub fn directives(&self) -> Option<String> {
+        let (host, port) = (&self.host, self.port);
+        match self.kind {
+            ProxyKind::Profile => None,
+            // `auto` asks for a password (over the management socket) only
+            // if the proxy wants one, and picks Basic, Digest or NTLM.
+            ProxyKind::Http if self.auth => Some(format!("http-proxy {host} {port} auto\n")),
+            ProxyKind::Http => Some(format!("http-proxy {host} {port}\n")),
+            ProxyKind::Socks if self.auth => Some(format!("socks-proxy {host} {port} stdin\n")),
+            ProxyKind::Socks => Some(format!("socks-proxy {host} {port}\n")),
+        }
+    }
 }
 
 /// Share the VPN with other devices on the LAN through a proxy.
@@ -167,6 +305,7 @@ pub struct Settings {
     pub dns_leak_protection: bool,
     pub split: SplitSettings,
     pub proxy_gateway: ProxyGateway,
+    pub connection_proxy: ConnectionProxy,
 }
 
 /// Which side of the tunnel the listed traffic goes to.
@@ -211,6 +350,7 @@ impl Default for Settings {
             dns_leak_protection: true,
             split: SplitSettings::default(),
             proxy_gateway: ProxyGateway::default(),
+            connection_proxy: ConnectionProxy::default(),
         }
     }
 }
@@ -220,6 +360,21 @@ impl Settings {
     pub fn validate(&self) -> Result<(), String> {
         if self.proxy_gateway.port < 1024 {
             return Err("Use a proxy port from 1024 up.".into());
+        }
+        let cp = &self.connection_proxy;
+        if cp.active() {
+            let host_ok = !cp.host.is_empty()
+                && cp.host.len() <= 253
+                && cp
+                    .host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_'));
+            if !host_ok {
+                return Err("Enter the proxy's host name or IP address.".into());
+            }
+            if cp.port == 0 {
+                return Err("Enter the proxy's port.".into());
+            }
         }
         if self.split.apps.len() > 200
             || self.split.hosts.len() > 2000

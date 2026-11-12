@@ -1,4 +1,4 @@
-import { Copy, Download, Loader2, RefreshCw, Trash2 } from "lucide-react";
+import { ChevronRight, Copy, Download, FileUp, FolderOpen, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -7,37 +7,66 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { DnsSettings, FirewallSettings, GatewaySettings } from "@/components/SecuritySettings";
+import { ConnectionProxySettings, DnsSettings, FirewallSettings, GatewaySettings } from "@/components/SecuritySettings";
 import { GeneralSettings } from "@/components/GeneralSettings";
 import { SplitSettings } from "@/components/SplitSettings";
-import { api, errorText, type Network, type Prefs, type Profile, type Settings, type Status, type UpdateInfo } from "@/lib/api";
+import {
+  api,
+  errorText,
+  type Network,
+  type Prefs,
+  type Profile,
+  type ProfileEdit,
+  type SavedCredentials,
+  type Settings,
+  type Status,
+  type UpdateInfo,
+} from "@/lib/api";
 import { formatAgo } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () => void }) {
   const [name, setName] = useState(profile.name);
   const [group, setGroup] = useState(profile.group);
   const [country, setCountry] = useState(profile.country ?? "");
+  const [dco, setDco] = useState(!profile.disable_dco);
+  const [extra, setExtra] = useState(profile.extra_directives);
+  const [advanced, setAdvanced] = useState(profile.disable_dco || profile.extra_directives !== "");
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<SavedCredentials>({ login: false, key: false, proxy: false });
 
   useEffect(() => {
-    if (profile.auth !== "certificate") api.hasCredentials(profile.id).then(setSaved).catch(() => {});
-  }, [profile.id, profile.auth]);
-  const dirty = name !== profile.name || group !== profile.group || country !== (profile.country ?? "");
+    if (profile.auth !== "certificate" || profile.key_encrypted) api.savedCredentials(profile.id).then(setSaved).catch(() => {});
+  }, [profile.id, profile.auth, profile.key_encrypted]);
+  const dirty =
+    name !== profile.name ||
+    group !== profile.group ||
+    country !== (profile.country ?? "") ||
+    dco === profile.disable_dco ||
+    extra.trim() !== profile.extra_directives.trim();
 
   async function save() {
     if (country && !/^[a-zA-Z]{2}$/.test(country)) {
       setError("Country must be a two-letter code, like DE.");
       return;
     }
+    const edit: ProfileEdit = { name, group, country: country || "-", disable_dco: !dco, extra_directives: extra };
     try {
-      await api.updateProfile(profile.id, name, group, country || "-");
+      const p = await api.updateProfile(profile.id, edit);
+      setExtra(p.extra_directives);
       setError(null);
       onChanged();
     } catch (e) {
       setError(errorText(e));
     }
+  }
+
+  function forget(kind: "login" | "key") {
+    api
+      .forgetCredentials(profile.id, kind)
+      .then(() => setSaved((s) => ({ ...s, [kind]: false })))
+      .catch((e) => setError(errorText(e)));
   }
 
   async function remove() {
@@ -55,7 +84,7 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
   }
 
   return (
-    <div className="grid gap-2 border-b py-3 last:border-0">
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2 border-b py-3 last:border-0">
       <div className="flex items-center justify-between gap-2">
         <span className="truncate font-mono text-[11px] text-dim">
           {profile.source_file} · {profile.remote_host} · last used {formatAgo(profile.last_connected_at).toLowerCase()}
@@ -86,22 +115,63 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
           className="h-8 text-center font-mono text-[13px]"
         />
       </div>
-      {saved && (
+      {saved.login && (
         <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
           <span>Password saved in your keyring</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 text-muted-foreground"
-            onClick={() => api.forgetCredentials(profile.id).then(() => setSaved(false)).catch((e) => setError(errorText(e)))}
-          >
+          <Button variant="ghost" size="sm" className="h-7 text-muted-foreground" onClick={() => forget("login")}>
             Forget
           </Button>
         </div>
       )}
+      {saved.key && (
+        <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span>Key passphrase saved in your keyring</span>
+          <Button variant="ghost" size="sm" className="h-7 text-muted-foreground" onClick={() => forget("key")}>
+            Forget
+          </Button>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => setAdvanced((a) => !a)}
+        aria-expanded={advanced}
+        className="flex cursor-pointer items-center gap-1 justify-self-start text-xs text-muted-foreground hover:text-foreground"
+      >
+        <ChevronRight className={cn("size-3.5 transition-transform", advanced && "rotate-90")} />
+        Advanced
+      </button>
+      {advanced && (
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3 rounded-lg border p-3">
+          <div className="flex items-center justify-between gap-4">
+            <Label htmlFor={`dco-${profile.id}`} className="grid gap-1 font-normal">
+              <span className="text-[13px] font-medium">Data channel offload (DCO)</span>
+              <span className="text-xs leading-5 text-muted-foreground">Faster encryption in the kernel. Turn off if the connection misbehaves.</span>
+            </Label>
+            <Switch id={`dco-${profile.id}`} checked={dco} onCheckedChange={setDco} />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor={`extra-${profile.id}`} className="text-[13px] font-medium">
+              Extra options
+            </Label>
+            <textarea
+              id={`extra-${profile.id}`}
+              value={extra}
+              onChange={(e) => {
+                setExtra(e.target.value);
+                setError(null);
+              }}
+              rows={3}
+              spellCheck={false}
+              placeholder={"mssfix 1400\ntun-mtu 1500"}
+              className="selectable scroll-subtle min-h-16 w-full min-w-0 resize-y rounded-md border bg-transparent px-3 py-2 font-mono text-[12px] leading-5 outline-none placeholder:text-dim focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            />
+            <span className="text-xs leading-5 text-muted-foreground">OpenVPN directives, one per line, added after the profile's own.</span>
+          </div>
+        </div>
+      )}
       {(dirty || error) && (
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[12px] text-destructive">{error}</span>
+          <span className="min-w-0 text-[12px] break-words text-destructive">{error}</span>
           {dirty && (
             <Button size="sm" onClick={save}>
               Save
@@ -212,6 +282,8 @@ export function SettingsDialog({
   profiles,
   log,
   onProfilesChanged,
+  onImportFiles,
+  onImportFolder,
   updates,
   settings,
   status,
@@ -227,6 +299,8 @@ export function SettingsDialog({
   profiles: Profile[];
   log: string[];
   onProfilesChanged: () => void;
+  onImportFiles: () => void;
+  onImportFolder: () => void;
   updates: UpdateSettings;
   settings: Settings;
   status: Status;
@@ -247,7 +321,7 @@ export function SettingsDialog({
         <Tabs value={tab} onValueChange={onTabChange}>
           <TabsList className="w-full">
             <TabsTrigger value="split">Split</TabsTrigger>
-            <TabsTrigger value="firewall">Firewall</TabsTrigger>
+            <TabsTrigger value="firewall">Network</TabsTrigger>
             <TabsTrigger value="dns">DNS</TabsTrigger>
             <TabsTrigger value="profiles">Profiles</TabsTrigger>
             <TabsTrigger value="log">Log</TabsTrigger>
@@ -261,6 +335,7 @@ export function SettingsDialog({
           <TabsContent value="firewall">
             <div className="scroll-subtle grid max-h-[28rem] gap-4 overflow-y-auto pr-1">
               <FirewallSettings settings={settings} onChange={onSettingsChange} />
+              <ConnectionProxySettings settings={settings} onChange={onSettingsChange} />
               <GatewaySettings settings={settings} status={status} onChange={onSettingsChange} />
             </div>
           </TabsContent>
@@ -268,11 +343,27 @@ export function SettingsDialog({
             <DnsSettings settings={settings} status={status} onChange={onSettingsChange} />
           </TabsContent>
           <TabsContent value="profiles">
-            <div className="scroll-subtle max-h-[26rem] overflow-y-auto pr-1">
+            <div className="flex gap-2 pb-1">
+              <Button size="sm" variant="outline" onClick={onImportFiles}>
+                <FileUp />
+                Import files
+              </Button>
+              <Button size="sm" variant="outline" onClick={onImportFolder}>
+                <FolderOpen />
+                Import folder
+              </Button>
+            </div>
+            <div className="scroll-subtle max-h-[24rem] overflow-y-auto pr-1">
               {profiles.length === 0 ? (
                 <p className="py-6 text-center text-sm text-muted-foreground">No profiles yet.</p>
               ) : (
-                profiles.map((p) => <ProfileRow key={`${p.id}:${p.name}:${p.group}:${p.country}`} profile={p} onChanged={onProfilesChanged} />)
+                profiles.map((p) => (
+                  <ProfileRow
+                    key={`${p.id}:${p.name}:${p.group}:${p.country}:${p.disable_dco}:${p.extra_directives}:${p.key_encrypted}`}
+                    profile={p}
+                    onChanged={onProfilesChanged}
+                  />
+                ))
               )}
             </div>
           </TabsContent>

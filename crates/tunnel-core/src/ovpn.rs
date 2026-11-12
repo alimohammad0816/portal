@@ -123,8 +123,12 @@ pub enum ConfigError {
     NoRemote,
     #[error("line {line}: invalid port `{value}`")]
     BadPort { value: String, line: usize },
-    #[error("the config is larger than 1 MiB")]
+    #[error("the config is too large")]
     TooLarge,
+    #[error("line {line}: `{directive}` can't be changed in extra options")]
+    NotInExtra { directive: String, line: usize },
+    #[error("line {line}: extra options can't contain <{tag}> blocks")]
+    BlockInExtra { tag: String, line: usize },
     #[error("could not read {path}: {reason}")]
     Read { path: String, reason: String },
 }
@@ -146,6 +150,8 @@ pub struct ParsedConfig {
     pub challenge: Option<String>,
     /// `tun` or `tap`, from the `dev` / `dev-type` directives.
     pub dev_type: String,
+    /// The inline private key is encrypted and needs a passphrase.
+    pub key_encrypted: bool,
     /// Config text safe to hand to OpenVPN.
     pub sanitized: String,
 }
@@ -291,6 +297,34 @@ fn parse_port(value: &str, line: usize) -> Result<u16, ConfigError> {
     })
 }
 
+/// Checks every directive gets, wherever it appears. Returns the
+/// lower-cased directive name.
+fn check_safe(words: &[String], line: usize) -> Result<String, ConfigError> {
+    let name = words[0].trim_start_matches("--").to_ascii_lowercase();
+    if FORBIDDEN.contains(&name.as_str()) {
+        return Err(ConfigError::Forbidden {
+            directive: name,
+            line,
+        });
+    }
+    let arg = |i: usize| words.get(i).map(String::as_str);
+    let external = match name.as_str() {
+        n if FILE_DIRECTIVES.contains(&n) => arg(1).unwrap_or("") != "[inline]",
+        // The third argument is a credentials file, unless OpenVPN is to
+        // ask for them (over the management socket).
+        "http-proxy" => arg(3).is_some_and(|a| !matches!(a, "auto" | "auto-nct" | "stdin")),
+        "socks-proxy" => arg(3).is_some_and(|a| a != "stdin"),
+        _ => false,
+    };
+    if external {
+        return Err(ConfigError::ExternalFile {
+            directive: name,
+            line,
+        });
+    }
+    Ok(name)
+}
+
 /// Validate a config and produce the text the daemon will run.
 pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
     if text.len() > MAX_CONFIG_BYTES {
@@ -306,26 +340,12 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
     let mut inline_creds = false;
     let mut challenge = None;
     let mut dev_type = "tun".to_string();
+    let mut key_encrypted = false;
     let mut out = String::with_capacity(text.len());
 
     let mut check =
         |words: &[String], line: usize, out: &mut String, raw: &str| -> Result<(), ConfigError> {
-            let name = words[0].trim_start_matches("--").to_ascii_lowercase();
-            if FORBIDDEN.contains(&name.as_str()) {
-                return Err(ConfigError::Forbidden {
-                    directive: name,
-                    line,
-                });
-            }
-            if FILE_DIRECTIVES.contains(&name.as_str()) {
-                let arg = words.get(1).map(String::as_str).unwrap_or("");
-                if arg != "[inline]" {
-                    return Err(ConfigError::ExternalFile {
-                        directive: name,
-                        line,
-                    });
-                }
-            }
+            let name = check_safe(words, line)?;
             match name.as_str() {
                 "remote" => {
                     let host = words.get(1).cloned().unwrap_or_default();
@@ -368,12 +388,6 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
                         }
                     }
                 }
-                "http-proxy" if words.len() > 3 => {
-                    return Err(ConfigError::ExternalFile {
-                        directive: name,
-                        line,
-                    });
-                }
                 _ => {}
             }
             out.push_str(raw.trim_end());
@@ -397,6 +411,11 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
                 }
                 if tag == "auth-user-pass" {
                     inline_creds = true;
+                }
+                // PKCS#8 (`BEGIN ENCRYPTED PRIVATE KEY`) and the older
+                // `Proc-Type: 4,ENCRYPTED` PEM headers.
+                if tag == "key" && body.iter().any(|l| l.contains("ENCRYPTED")) {
+                    key_encrypted = true;
                 }
                 out.push_str(&format!("<{tag}>\n"));
                 if tag == "connection" {
@@ -449,8 +468,97 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
         auth,
         challenge,
         dev_type,
+        key_encrypted,
         sanitized: out,
     })
+}
+
+/// Largest block of extra options we accept.
+pub const MAX_EXTRA_BYTES: usize = 8 * 1024;
+
+/// Directives that would change how the daemon talks to OpenVPN or
+/// contradict what it learned from the profile.
+const NOT_IN_EXTRA: &[&str] = &[
+    "auth-user-pass",
+    "static-challenge",
+    "dev",
+    "dev-type",
+    "auth-retry",
+    "auth-nocache",
+    "route-noexec",
+    "dns-updown",
+];
+
+/// Check user-supplied extra options (one directive per line, no inline
+/// blocks) and return them normalized.
+pub fn sanitize_extra(text: &str) -> Result<String, ConfigError> {
+    if text.len() > MAX_EXTRA_BYTES {
+        return Err(ConfigError::TooLarge);
+    }
+    let mut out = String::new();
+    for item in split_items(text)? {
+        match item {
+            Item::Other(raw) => {
+                if !raw.trim().is_empty() {
+                    out.push_str(raw.trim());
+                    out.push('\n');
+                }
+            }
+            Item::Block { line, tag, .. } => return Err(ConfigError::BlockInExtra { tag, line }),
+            Item::Directive { line, raw, words } => {
+                let name = check_safe(&words, line)?;
+                if NOT_IN_EXTRA.contains(&name.as_str()) {
+                    return Err(ConfigError::NotInExtra {
+                        directive: name,
+                        line,
+                    });
+                }
+                out.push_str(raw.trim());
+                out.push('\n');
+            }
+        }
+    }
+    Ok(out)
+}
+
+const PROXY_DIRECTIVES: &[&str] = &[
+    "http-proxy",
+    "http-proxy-option",
+    "http-proxy-user-pass",
+    "http-proxy-retry",
+    "http-proxy-timeout",
+    "socks-proxy",
+    "socks-proxy-retry",
+];
+
+/// Remove a (sanitized) config's own proxy settings, so a proxy chosen in
+/// the app replaces them instead of clashing.
+pub fn strip_proxies(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_creds = false;
+    for raw in text.lines() {
+        let t = raw.trim();
+        if in_creds {
+            in_creds = !t.eq_ignore_ascii_case("</http-proxy-user-pass>");
+            continue;
+        }
+        if t.eq_ignore_ascii_case("<http-proxy-user-pass>") {
+            in_creds = true;
+            continue;
+        }
+        let first = t
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("--")
+            .to_ascii_lowercase();
+        if PROXY_DIRECTIVES.contains(&first.as_str()) {
+            continue;
+        }
+        out.push_str(raw);
+        out.push('\n');
+    }
+    out
 }
 
 /// Replace file references (`ca ca.crt`, `tls-auth ta.key 1`, ...) with inline
@@ -691,6 +799,70 @@ mod tests {
         assert!(out.contains("<ca>\nCA-DATA\n</ca>"));
         assert!(out.contains("<tls-auth>\nTA-DATA\n</tls-auth>\nkey-direction 1"));
         assert!(sanitize(&out).is_ok());
+    }
+
+    #[test]
+    fn detects_encrypted_keys() {
+        let enc = "client\nremote a\n<key>\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAA\n-----END ENCRYPTED PRIVATE KEY-----\n</key>\n";
+        assert!(sanitize(enc).unwrap().key_encrypted);
+        let old = "client\nremote a\n<key>\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nAAA\n</key>\n";
+        assert!(sanitize(old).unwrap().key_encrypted);
+        let plain = "client\nremote a\n<key>\n-----BEGIN PRIVATE KEY-----\nAAA\n</key>\n";
+        assert!(!sanitize(plain).unwrap().key_encrypted);
+    }
+
+    #[test]
+    fn proxy_credentials_must_come_from_the_user() {
+        assert!(sanitize("client\nremote a\nhttp-proxy p.example 8080\n").is_ok());
+        assert!(sanitize("client\nremote a\nhttp-proxy p.example 8080 auto ntlm\n").is_ok());
+        assert!(sanitize("client\nremote a\nsocks-proxy p.example 1080 stdin\n").is_ok());
+        for d in [
+            "http-proxy p.example 8080 /root/creds",
+            "socks-proxy p.example 1080 /etc/shadow",
+        ] {
+            let cfg = format!("client\nremote a\n{d}\n");
+            assert!(
+                matches!(
+                    sanitize(&cfg),
+                    Err(ConfigError::ExternalFile { line: 3, .. })
+                ),
+                "{d}"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_extra_options() {
+        assert_eq!(
+            sanitize_extra("  mssfix 1400\n\n# note\ntun-mtu 1500  \n").unwrap(),
+            "mssfix 1400\n# note\ntun-mtu 1500\n"
+        );
+        assert!(matches!(
+            sanitize_extra("mssfix 1400\nup /bin/sh\n"),
+            Err(ConfigError::Forbidden { line: 2, .. })
+        ));
+        assert!(matches!(
+            sanitize_extra("ca /etc/ssl/ca.pem"),
+            Err(ConfigError::ExternalFile { .. })
+        ));
+        assert!(matches!(
+            sanitize_extra("<ca>\nAAA\n</ca>\n"),
+            Err(ConfigError::BlockInExtra { .. })
+        ));
+        assert!(matches!(
+            sanitize_extra("dev tap0"),
+            Err(ConfigError::NotInExtra { .. })
+        ));
+    }
+
+    #[test]
+    fn strips_profile_proxies() {
+        let cfg = "client\nremote a\nhttp-proxy p 8080 auto\nhttp-proxy-option VERSION 1.1\n<http-proxy-user-pass>\nu\np\n</http-proxy-user-pass>\n<connection>\nremote b\nsocks-proxy s 1080\n</connection>\n";
+        let out = strip_proxies(cfg);
+        assert_eq!(
+            out,
+            "client\nremote a\n<connection>\nremote b\n</connection>\n"
+        );
     }
 
     #[test]

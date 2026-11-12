@@ -19,20 +19,18 @@ pub trait Daemon {
     /// must already have its file references inlined.
     fn import_profile(&self, file_name: &str, content: &str) -> zbus::Result<String>;
 
-    fn update_profile(
-        &self,
-        id: &str,
-        name: &str,
-        group: &str,
-        country: &str,
-    ) -> zbus::Result<String>;
+    /// `edit` is a JSON `ProfileEdit`; returns the updated `Profile`.
+    fn update_profile(&self, id: &str, edit: &str) -> zbus::Result<String>;
 
     fn remove_profile(&self, id: &str) -> zbus::Result<()>;
 
-    /// Credentials may be empty for certificate-only profiles. `response` is
-    /// the answer to a static challenge (OTP), empty if none.
-    fn connect(&self, id: &str, username: &str, password: &str, response: &str)
-    -> zbus::Result<()>;
+    /// `secrets` is a JSON `Secrets`; `{}` for certificate-only profiles.
+    /// If something is missing, the status turns `needs_credentials` with a
+    /// `request` saying what.
+    fn connect(&self, id: &str, secrets: &str) -> zbus::Result<()>;
+
+    /// Answer the server's challenge (`request.kind` = `challenge`).
+    fn answer_challenge(&self, response: &str) -> zbus::Result<()>;
 
     fn disconnect(&self) -> zbus::Result<()>;
 

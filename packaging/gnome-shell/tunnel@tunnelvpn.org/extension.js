@@ -80,7 +80,7 @@ class TunnelToggle extends QuickMenuToggle {
         this.menu.addAction('Open Tunnel', () => launch(['--show']));
 
         this.connect('clicked', () => {
-            if (!this._proxy)
+            if (!this._proxy || this._status.state === 'needs_credentials')
                 launch(['--show']);
             else if (this._status.state === 'disconnected' && !this._status.internet_blocked)
                 launch(['--connect']);

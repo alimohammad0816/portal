@@ -16,6 +16,18 @@ const PATH: &str = "/org/freedesktop/secrets";
 const DEFAULT_COLLECTION: &str = "/org/freedesktop/secrets/aliases/default";
 const APP: &str = "org.tunnelvpn.Tunnel";
 
+/// Keyring entries: a profile's sign-in, its private key passphrase, and
+/// the connection proxy's sign-in (shared by all profiles).
+pub fn login_slot(profile: &str) -> String {
+    profile.to_string()
+}
+
+pub fn key_slot(profile: &str) -> String {
+    format!("{profile}:key")
+}
+
+pub const PROXY_SLOT: &str = "connection-proxy";
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Saved {
     pub username: String,

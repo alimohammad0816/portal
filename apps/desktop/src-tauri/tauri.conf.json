@@ -6,6 +6,7 @@
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
+    "beforeBundleCommand": "cargo build --release --locked -p tunneld -p tunnel-cli",
     "frontendDist": "../dist"
   },
   "app": {

@@ -31,7 +31,33 @@ code as root. Imports are sanitized: script hooks (`up`, `down`,
 `script-security`, `plugin`, ...), management and logging directives, and
 anything that reads or writes an arbitrary path are rejected. Keys and
 certificates must be inline; the app and CLI read referenced files as the
-user and embed them before sending the profile to the daemon.
+user and embed them before sending the profile to the daemon. The same
+checks apply to a profile's extra options.
+
+## Sign-in
+
+Everything a server or profile can ask for is supported, and each secret
+can be saved in your keyring:
+
+- username and password, with a static one-time code (`static-challenge`);
+- a passphrase for an encrypted private key (asked up front when the key is
+  visibly encrypted, otherwise the first time OpenVPN needs it);
+- dynamic challenges (`CRV1`, e.g. a token PIN after the password) and
+  pending-auth challenges (`CR_TEXT`), answered in a dialog;
+- web sign-in (`WEB_AUTH` / `OPEN_URL`), opened in your browser;
+- the username and password of the proxy you connect through.
+
+## Profiles
+
+Import `.ovpn`/`.conf` files or a whole folder (it and its subfolders one
+level deep), by drag and drop or from Settings › Profiles. Per profile you
+can rename it, group it, set its country, turn off data channel offload
+(DCO), and add extra OpenVPN directives (`mssfix 1400`, ...).
+
+To reach servers from networks that only let web traffic out, set a
+connection proxy (HTTP or SOCKS5, optionally with a password) in
+Settings › Network, or `tunnel settings proxy=http://proxy.lan:3128
+proxy-auth=on`. It replaces any proxy the profile names.
 
 ## Development
 
@@ -224,3 +250,5 @@ gnome-extensions enable tunnel@tunnelvpn.org
 3. Done: split tunneling by app, domain, IP/network and country.
 4. Done: saved passwords, start at login, trusted networks, exit location,
    proxy gateway, GNOME quick settings tile.
+5. Done: key passphrases, dynamic and web sign-in, connection proxy,
+   folder import, DCO and extra options per profile.
