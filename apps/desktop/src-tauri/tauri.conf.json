@@ -31,18 +31,36 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb"],
+    "targets": [
+      "deb",
+      "rpm"
+    ],
     "category": "Utility",
     "shortDescription": "OpenVPN client with split tunneling",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
     "longDescription": "Portal imports your OpenVPN profiles and connects with one click. It includes a background service (portald), a desktop app with a tray icon, and the `portal` command-line tool.",
     "license": "GPL-3.0-or-later",
     "linux": {
       "deb": {
-        "depends": ["openvpn", "nftables", "systemd-resolved | systemd (<< 251)", "polkitd | policykit-1", "iputils-ping"],
+        "depends": [
+          "openvpn",
+          "nftables",
+          "systemd-resolved | systemd (<< 251)",
+          "polkitd | policykit-1",
+          "iputils-ping"
+        ],
         "section": "net",
-        "conflicts": ["tunnel"],
-        "replaces": ["tunnel"],
+        "conflicts": [
+          "tunnel"
+        ],
+        "replaces": [
+          "tunnel"
+        ],
         "files": {
           "/usr/libexec/portald": "../../../target/release/portald",
           "/usr/bin/portal": "../../../target/release/portal",
@@ -51,11 +69,36 @@
           "/usr/share/dbus-1/system-services/io.github.alimohammad0816.Portal.Daemon1.service": "../../../packaging/dbus/io.github.alimohammad0816.Portal.Daemon1.service",
           "/usr/share/polkit-1/actions/io.github.alimohammad0816.Portal.policy": "../../../packaging/polkit/io.github.alimohammad0816.Portal.policy",
           "/usr/share/gnome-shell/extensions/portal@alimohammad0816.github.io/metadata.json": "../../../packaging/gnome-shell/portal@alimohammad0816.github.io/metadata.json",
-          "/usr/share/gnome-shell/extensions/portal@alimohammad0816.github.io/extension.js": "../../../packaging/gnome-shell/portal@alimohammad0816.github.io/extension.js"
+          "/usr/share/gnome-shell/extensions/portal@alimohammad0816.github.io/extension.js": "../../../packaging/gnome-shell/portal@alimohammad0816.github.io/extension.js",
+          "/usr/lib/portal/package-format": "../../../packaging/deb/package-format"
         },
         "postInstallScript": "../../../packaging/deb/postinst",
         "preRemoveScript": "../../../packaging/deb/prerm",
         "postRemoveScript": "../../../packaging/deb/postrm"
+      },
+      "rpm": {
+        "depends": [
+          "openvpn",
+          "nftables",
+          "polkit",
+          "iputils",
+          "(systemd-resolved or systemd-network)"
+        ],
+        "release": "1",
+        "files": {
+          "/usr/libexec/portald": "../../../target/release/portald",
+          "/usr/bin/portal": "../../../target/release/portal",
+          "/usr/lib/systemd/system/portald.service": "../../../packaging/systemd/portald.service",
+          "/usr/share/dbus-1/system.d/io.github.alimohammad0816.Portal.Daemon1.conf": "../../../packaging/dbus/io.github.alimohammad0816.Portal.Daemon1.conf",
+          "/usr/share/dbus-1/system-services/io.github.alimohammad0816.Portal.Daemon1.service": "../../../packaging/dbus/io.github.alimohammad0816.Portal.Daemon1.service",
+          "/usr/share/polkit-1/actions/io.github.alimohammad0816.Portal.policy": "../../../packaging/polkit/io.github.alimohammad0816.Portal.policy",
+          "/usr/share/gnome-shell/extensions/portal@alimohammad0816.github.io/metadata.json": "../../../packaging/gnome-shell/portal@alimohammad0816.github.io/metadata.json",
+          "/usr/share/gnome-shell/extensions/portal@alimohammad0816.github.io/extension.js": "../../../packaging/gnome-shell/portal@alimohammad0816.github.io/extension.js",
+          "/usr/lib/portal/package-format": "../../../packaging/rpm/package-format"
+        },
+        "postInstallScript": "../../../packaging/rpm/post",
+        "preRemoveScript": "../../../packaging/rpm/preun",
+        "postRemoveScript": "../../../packaging/rpm/postun"
       }
     }
   }

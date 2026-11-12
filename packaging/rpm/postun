@@ -1,0 +1,6 @@
+# Runs after the package is removed. Saved profiles in /var/lib/portald
+# are kept, as RPM has no purge; delete that folder to remove them.
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+fi
+exit 0

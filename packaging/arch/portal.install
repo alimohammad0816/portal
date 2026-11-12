@@ -1,0 +1,32 @@
+_reload() {
+  [ -d /run/systemd/system ] || return 0
+  systemctl daemon-reload || true
+  # Pick up the D-Bus policy for io.github.alimohammad0816.Portal.Daemon1.
+  systemctl reload dbus.service 2>/dev/null || true
+}
+
+post_install() {
+  _reload
+  [ -d /run/systemd/system ] && systemctl enable --now portald.service >/dev/null 2>&1
+  echo "Portal: make sure systemd-resolved is running (systemctl enable --now systemd-resolved)."
+  true
+}
+
+post_upgrade() {
+  _reload
+  # Swaps in the new daemon; an active VPN reconnects from the app.
+  [ -d /run/systemd/system ] && systemctl restart portald.service
+  true
+}
+
+pre_remove() {
+  [ -d /run/systemd/system ] && systemctl disable --now portald.service >/dev/null 2>&1
+  # Don't leave the kill switch behind (it outlives the service in
+  # "always" mode).
+  nft delete table inet portal >/dev/null 2>&1
+  true
+}
+
+post_remove() {
+  _reload
+}

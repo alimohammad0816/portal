@@ -1,8 +1,9 @@
-//! Installing app updates. The desktop app downloads a release `.deb` and
-//! its minisign signature as the user and hands the daemon an open file
-//! descriptor. The daemon (root) only installs packages that are signed by
-//! the release key compiled into it, are named `portal`, and are newer than
-//! the running version.
+//! Installing app updates. The desktop app downloads the release package
+//! for this system (`.deb`, `.rpm` or Arch `.pkg.tar.zst`) and its minisign
+//! signature as the user and hands the daemon an open file descriptor. The
+//! daemon (root) only installs packages that are signed by the release key
+//! compiled into it, are named `portal`, and are newer than the running
+//! version.
 
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -11,6 +12,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 use minisign_verify::{PublicKey, Signature};
+use portal_core::package::{PackageFormat, is_newer};
 
 /// Public half of the release signing key (`minisign -G`). Only packages
 /// signed with the matching secret key, which lives in the GitHub Actions
@@ -43,26 +45,88 @@ pub fn verify(data: &[u8], signature: &str) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("the update's signature doesn't match the release key"))
 }
 
-fn dpkg_field(path: &Path, field: &str) -> Result<String> {
-    let out = Command::new("dpkg-deb")
-        .arg("--field")
-        .arg(path)
-        .arg(field)
-        .output()
-        .context("running dpkg-deb")?;
+fn run(cmd: &mut Command, what: &str) -> Result<String> {
+    let out = cmd.output().with_context(|| format!("running {what}"))?;
     ensure!(
         out.status.success(),
-        "the update isn't a valid .deb package"
+        "the update isn't a valid package ({what} failed)"
     );
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-fn is_newer(candidate: &str, current: &str) -> Result<bool> {
-    let status = Command::new("dpkg")
-        .args(["--compare-versions", candidate, "gt", current])
-        .status()
-        .context("running dpkg")?;
-    Ok(status.success())
+/// Name and version recorded in the package file.
+fn package_info(format: PackageFormat, path: &Path) -> Result<(String, String)> {
+    match format {
+        PackageFormat::Deb => {
+            let field = |f: &str| -> Result<String> {
+                Ok(run(
+                    Command::new("dpkg-deb").arg("--field").arg(path).arg(f),
+                    "dpkg-deb",
+                )?
+                .trim()
+                .to_string())
+            };
+            Ok((field("Package")?, field("Version")?))
+        }
+        PackageFormat::Rpm => {
+            let out = run(
+                Command::new("rpm")
+                    .args([
+                        "-qp",
+                        "--nosignature",
+                        "--queryformat",
+                        "%{NAME}\\n%{VERSION}\\n",
+                    ])
+                    .arg(path),
+                "rpm",
+            )?;
+            let mut lines = out.lines();
+            Ok((
+                lines.next().unwrap_or("").trim().to_string(),
+                lines.next().unwrap_or("").trim().to_string(),
+            ))
+        }
+        PackageFormat::Arch => {
+            let out = run(Command::new("pacman").arg("-Qip").arg(path), "pacman")?;
+            Ok(parse_pacman_info(&out))
+        }
+    }
+}
+
+/// `Name : portal` and `Version : 0.2.0-1` from `pacman -Qip`.
+fn parse_pacman_info(text: &str) -> (String, String) {
+    let field = |name: &str| {
+        text.lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim() == name)
+            .map(|(_, v)| v.trim().to_string())
+            .unwrap_or_default()
+    };
+    (field("Name"), field("Version"))
+}
+
+/// The package manager command that installs `path`.
+fn installer(format: PackageFormat) -> Vec<&'static str> {
+    let has = |p: &str| Path::new(p).exists();
+    match format {
+        PackageFormat::Deb => vec![
+            "--setenv",
+            "DEBIAN_FRONTEND=noninteractive",
+            "/usr/bin/apt-get",
+            "install",
+            "-y",
+            "--no-install-recommends",
+        ],
+        PackageFormat::Rpm if has("/usr/bin/dnf") => vec!["/usr/bin/dnf", "install", "-y"],
+        PackageFormat::Rpm if has("/usr/bin/zypper") => vec![
+            "/usr/bin/zypper",
+            "--non-interactive",
+            "install",
+            "--allow-unsigned-rpm",
+        ],
+        PackageFormat::Rpm => vec!["/usr/bin/rpm", "-U"],
+        PackageFormat::Arch => vec!["/usr/bin/pacman", "-U", "--noconfirm"],
+    }
 }
 
 /// Verify the package read from `source` and start installing it in a
@@ -85,8 +149,9 @@ pub fn install(mut source: std::fs::File, signature: &str, cache_dir: &Path) -> 
 
     verify(&data, signature)?;
 
+    let format = PackageFormat::installed();
     std::fs::create_dir_all(cache_dir)?;
-    let path: PathBuf = cache_dir.join("portal-update.deb");
+    let path: PathBuf = cache_dir.join(format!("portal-update.{}", format.extension()));
     let _ = std::fs::remove_file(&path);
     {
         use std::io::Write;
@@ -100,13 +165,18 @@ pub fn install(mut source: std::fs::File, signature: &str, cache_dir: &Path) -> 
         f.sync_all()?;
     }
 
-    let name = dpkg_field(&path, "Package")?;
+    let (name, version) = match package_info(format, &path) {
+        Ok(info) => info,
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+    };
     if name != PACKAGE_NAME {
         let _ = std::fs::remove_file(&path);
         bail!("the update is for package `{name}`, not `{PACKAGE_NAME}`");
     }
-    let version = dpkg_field(&path, "Version")?;
-    if !is_newer(&version, current_version())? {
+    if !is_newer(&version, current_version()) {
         let _ = std::fs::remove_file(&path);
         bail!(
             "version {version} isn't newer than the installed {}",
@@ -129,13 +199,7 @@ pub fn install(mut source: std::fs::File, signature: &str, cache_dir: &Path) -> 
             "--description",
             "Install Portal update",
         ])
-        .args(["--setenv", "DEBIAN_FRONTEND=noninteractive"])
-        .args([
-            "/usr/bin/apt-get",
-            "install",
-            "-y",
-            "--no-install-recommends",
-        ])
+        .args(installer(format))
         .arg(&path)
         .status()
         .context("starting the installer")?;
@@ -150,6 +214,15 @@ mod tests {
     #[test]
     fn release_key_parses() {
         public_key().unwrap();
+    }
+
+    #[test]
+    fn reads_pacman_package_info() {
+        let text = "Name            : portal\nVersion         : 0.2.0-1\nDescription     : OpenVPN client\n";
+        assert_eq!(
+            parse_pacman_info(text),
+            ("portal".to_string(), "0.2.0-1".to_string())
+        );
     }
 
     #[test]

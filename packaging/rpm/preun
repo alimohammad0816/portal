@@ -1,0 +1,10 @@
+# Runs before the package is removed ($1 = 0) or replaced by an upgrade ($1 = 1).
+if [ "$1" = 0 ]; then
+  if [ -d /run/systemd/system ]; then
+    systemctl disable --now portald.service >/dev/null 2>&1 || true
+  fi
+  # Don't leave the kill switch behind (it outlives the service in
+  # "always" mode).
+  nft delete table inet portal >/dev/null 2>&1 || true
+fi
+exit 0

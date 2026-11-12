@@ -1,0 +1,24 @@
+# Arch Linux package for Portal, made from the release's .deb.
+# The release workflow fills in the version and checksum; the filled-in
+# copy is attached to each GitHub release (and suits the AUR).
+#
+#   makepkg -si
+pkgname=portal
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='OpenVPN client with split tunneling, a kill switch and a tray app'
+arch=('x86_64')
+url='https://github.com/@REPO@'
+license=('GPL-3.0-or-later')
+depends=('openvpn' 'nftables' 'polkit' 'systemd' 'iputils'
+         'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator')
+options=('!strip' '!debug')
+install=portal.install
+source=("https://github.com/@REPO@/releases/download/v${pkgver}/portal_${pkgver}_amd64.deb")
+sha256sums=('@SHA256@')
+
+package() {
+  bsdtar -xf data.tar.* -C "$pkgdir"
+  # Tells the in-app updater to fetch the Arch package.
+  printf 'arch\n' > "$pkgdir/usr/lib/portal/package-format"
+}

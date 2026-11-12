@@ -5,6 +5,7 @@
 pub mod model;
 pub mod names;
 pub mod ovpn;
+pub mod package;
 pub mod proxy;
 pub mod split;
 

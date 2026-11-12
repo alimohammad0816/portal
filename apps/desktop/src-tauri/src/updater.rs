@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use portal_core::names::UPDATE_REPO;
+use portal_core::package::{PackageFormat, is_newer};
 use serde::{Deserialize, Serialize};
 
 const USER_AGENT: &str = concat!("Portal/", env!("CARGO_PKG_VERSION"), " (update check)");
@@ -27,7 +28,7 @@ pub struct Release {
     pub url: String,
     pub published_at: String,
     #[serde(skip)]
-    pub deb_url: String,
+    pub package_url: String,
     #[serde(skip)]
     pub sig_url: String,
 }
@@ -59,37 +60,6 @@ fn client() -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| e.to_string())
-}
-
-/// `1.2.10` > `1.2.9`; pre-release suffixes are ignored.
-pub fn is_newer(candidate: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
-        v.trim_start_matches('v')
-            .split(['-', '+'])
-            .next()
-            .unwrap_or("")
-            .split('.')
-            .map(|p| p.parse().unwrap_or(0))
-            .collect()
-    };
-    let (a, b) = (parse(candidate), parse(current));
-    for i in 0..a.len().max(b.len()) {
-        let (x, y) = (
-            a.get(i).copied().unwrap_or(0),
-            b.get(i).copied().unwrap_or(0),
-        );
-        if x != y {
-            return x > y;
-        }
-    }
-    false
-}
-
-fn arch_suffix() -> &'static str {
-    match std::env::consts::ARCH {
-        "aarch64" => "_arm64.deb",
-        _ => "_amd64.deb",
-    }
 }
 
 pub async fn check() -> Result<UpdateInfo, String> {
@@ -128,13 +98,16 @@ pub async fn check() -> Result<UpdateInfo, String> {
             available: None,
         });
     }
-    let deb = rel.assets.iter().find(|a| a.name.ends_with(arch_suffix()));
-    let sig = deb.and_then(|d| {
+    let format = PackageFormat::installed();
+    let package = format
+        .asset_suffix(std::env::consts::ARCH)
+        .and_then(|suffix| rel.assets.iter().find(|a| a.name.ends_with(suffix)));
+    let sig = package.and_then(|d| {
         rel.assets
             .iter()
             .find(|a| a.name == format!("{}.minisig", d.name))
     });
-    let (Some(deb), Some(sig)) = (deb, sig) else {
+    let (Some(package), Some(sig)) = (package, sig) else {
         // A release without a package for this machine isn't installable.
         return Ok(UpdateInfo {
             current,
@@ -150,7 +123,7 @@ pub async fn check() -> Result<UpdateInfo, String> {
             notes: rel.body.unwrap_or_default(),
             url: rel.html_url,
             published_at: rel.published_at.unwrap_or_default(),
-            deb_url: deb.browser_download_url.clone(),
+            package_url: package.browser_download_url.clone(),
             sig_url: sig.browser_download_url.clone(),
         }),
     })
@@ -169,7 +142,7 @@ pub async fn download(rel: &Release) -> Result<(PathBuf, String), String> {
         .await
         .map_err(|e| e.to_string())?;
     let bytes = http
-        .get(&rel.deb_url)
+        .get(&rel.package_url)
         .send()
         .await
         .and_then(|r| r.error_for_status())
@@ -186,24 +159,10 @@ pub async fn download(rel: &Release) -> Result<(PathBuf, String), String> {
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| e.to_string())?;
-    let path = dir.join(format!("portal_{}.deb", rel.version));
+    let ext = PackageFormat::installed().extension();
+    let path = dir.join(format!("portal_{}.{ext}", rel.version));
     tokio::fs::write(&path, &bytes)
         .await
         .map_err(|e| e.to_string())?;
     Ok((path, sig))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_newer;
-
-    #[test]
-    fn compares_versions() {
-        assert!(is_newer("v0.2.0", "0.1.9"));
-        assert!(is_newer("0.10.0", "0.9.3"));
-        assert!(is_newer("1.0.0", "0.99.99"));
-        assert!(!is_newer("0.1.0", "0.1.0"));
-        assert!(!is_newer("v0.1.0-rc1", "0.1.0"));
-        assert!(!is_newer("0.0.9", "0.1.0"));
-    }
 }
