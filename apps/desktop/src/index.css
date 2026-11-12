@@ -97,14 +97,9 @@
   }
 }
 
-/* Scrollbars that stay out of the way until you hover. */
-.scroll-subtle {
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-}
-.scroll-subtle:hover {
-  scrollbar-color: oklch(0.37 0.013 285.805) transparent;
-}
+/* Scrollbars that stay out of the way until you hover. Only the
+   ::-webkit-scrollbar rules: with scrollbar-width/scrollbar-color set,
+   WebKit draws its own overlay bar on top of the content instead. */
 .scroll-subtle::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -120,6 +115,22 @@
 }
 .scroll-subtle:hover::-webkit-scrollbar-thumb {
   background-color: oklch(0.37 0.013 285.805);
+}
+.scroll-subtle::-webkit-scrollbar-thumb:hover {
+  background-color: oklch(0.44 0.013 285.805);
+}
+.scroll-subtle::-webkit-scrollbar-thumb:active {
+  background-color: oklch(0.52 0.013 285.805);
+}
+.scroll-subtle::-webkit-scrollbar-corner {
+  background: transparent;
+}
+/* Puts the scrollbar in the dialog's padding, beside the content rather
+   than over it, and keeps the content's width the same either way. */
+.scroll-gutter {
+  margin-right: -14px;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 /* Edge fades for ScrollFade: shown only where content is hidden. */
 @property --fade-top {
@@ -142,10 +153,10 @@
     --fade-bottom 180ms ease;
 }
 .scroll-fade[data-fade-top] {
-  --fade-top: 28px;
+  --fade-top: 20px;
 }
 .scroll-fade[data-fade-bottom] {
-  --fade-bottom: 36px;
+  --fade-bottom: 24px;
 }
 
 @keyframes map-pulse {

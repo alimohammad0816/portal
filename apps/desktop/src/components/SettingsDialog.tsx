@@ -328,12 +328,12 @@ export function SettingsDialog({
             <TabsTrigger value="about">General</TabsTrigger>
           </TabsList>
           <TabsContent value="split">
-            <ScrollFade className="max-h-[28rem] overflow-y-auto pr-1">
+            <ScrollFade className="scroll-gutter max-h-[calc(100vh-15rem)] overflow-y-auto">
               <SplitSettings settings={settings} status={status} onChange={onSettingsChange} />
             </ScrollFade>
           </TabsContent>
           <TabsContent value="firewall">
-            <ScrollFade className="grid max-h-[28rem] gap-4 overflow-y-auto pr-1">
+            <ScrollFade className="scroll-gutter grid max-h-[calc(100vh-15rem)] gap-4 overflow-y-auto">
               <FirewallSettings settings={settings} onChange={onSettingsChange} />
               <ConnectionProxySettings settings={settings} onChange={onSettingsChange} />
               <GatewaySettings settings={settings} status={status} onChange={onSettingsChange} />
@@ -353,7 +353,7 @@ export function SettingsDialog({
                 Import folder
               </Button>
             </div>
-            <ScrollFade className="max-h-[24rem] overflow-y-auto pr-1">
+            <ScrollFade className="scroll-gutter max-h-[calc(100vh-18rem)] overflow-y-auto">
               {profiles.length === 0 ? (
                 <p className="py-6 text-center text-sm text-muted-foreground">No profiles yet.</p>
               ) : (
@@ -371,7 +371,7 @@ export function SettingsDialog({
             <LogView lines={log} />
           </TabsContent>
           <TabsContent value="about">
-            <ScrollFade className="grid max-h-[28rem] gap-5 overflow-y-auto pr-1">
+            <ScrollFade className="scroll-gutter grid max-h-[calc(100vh-15rem)] gap-5 overflow-y-auto">
               <GeneralSettings prefs={prefs} onChange={onPrefsChange} profiles={profiles} network={network} />
               <div className="border-t pt-1">
                 <AboutView u={updates} />
