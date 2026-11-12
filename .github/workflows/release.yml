@@ -128,7 +128,6 @@ jobs:
             packaging/arch/PKGBUILD.in > arch/PKGBUILD
           # makepkg uses the .deb next to the PKGBUILD instead of downloading it.
           docker run --rm -v "$PWD/arch:/pkg" archlinux:base-devel sh -ec '
-            pacman -Sy --noconfirm --needed --quiet libarchive >/dev/null
             useradd -m builder
             chown -R builder /pkg
             su builder -c "cd /pkg && makepkg --nodeps --noconfirm"

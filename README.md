@@ -117,27 +117,48 @@ portal connect de-fra
 
 ## Install
 
-Download `portal_X.Y.Z_amd64.deb` from the latest release, then:
+Every release has packages for amd64 (x86_64) and arm64 (aarch64). They
+need systemd with systemd-resolved, and glibc 2.35 or newer.
 
-```bash
-sudo apt install ./portal_X.Y.Z_amd64.deb
-```
+| Distribution | File | Install |
+| --- | --- | --- |
+| Ubuntu 22.04+, Debian 12+, Mint, Pop!_OS | `portal_X.Y.Z_amd64.deb` / `_arm64.deb` | `sudo apt install ./portal_X.Y.Z_amd64.deb` |
+| Fedora, openSUSE Tumbleweed | `portal-X.Y.Z-1.x86_64.rpm` / `.aarch64.rpm` | `sudo dnf install ./portal-X.Y.Z-1.x86_64.rpm` or `sudo zypper install ./portal-…rpm` |
+| Arch, Manjaro, EndeavourOS | `portal-X.Y.Z-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./portal-X.Y.Z-1-x86_64.pkg.tar.zst` |
 
-The package contains the app, the `portal` CLI and the `portald` service,
-which starts right away. `sudo apt purge portal` removes everything,
-including saved profiles.
+Each package contains the app, the `portal` CLI and the `portald` service,
+which starts right away. On Arch, also run
+`sudo systemctl enable --now systemd-resolved`. The release's `PKGBUILD`
+(with `portal.install`) builds the Arch package from the `.deb` with
+`makepkg -si` and suits the AUR.
+
+Removing: `sudo apt purge portal` removes everything, including saved
+profiles. `dnf remove`, `zypper remove` and `pacman -R` keep the profiles
+in `/var/lib/portald`.
+
+There's no AppImage, Flatpak or Snap: Portal needs a root service,
+D-Bus and polkit policies and firewall access, which those formats can't
+install.
 
 ## Releases and updates
 
-`.github/workflows/release.yml` runs on every `v*` tag: it tests, builds the
-`.deb`, signs it with minisign, and publishes it with `SHA256SUMS` as a
-GitHub release. The app checks the latest release every few hours (it can
-be turned off under Settings › About), shows an **Update** button, downloads
-the package as the user, and passes it to `portald`. The service installs it
-only when it is signed with the release key in
-`packaging/update-key.pub`, is named `portal`, and is newer than what's
-installed. The install runs in its own systemd unit, so it survives the
-service restarting itself.
+`.github/workflows/release.yml` runs on every `v*` tag. It builds the
+`.deb` and `.rpm` on Ubuntu 22.04 for amd64 and arm64, makes the Arch
+package from the amd64 `.deb`, and installs each package in fresh Ubuntu
+22.04 and 24.04, Debian 12, Fedora, openSUSE Tumbleweed and Arch containers
+(checking files, libraries and that the binaries start). Only when all of
+them pass does it sign the packages with minisign and publish them with
+`SHA256SUMS` as a GitHub release. Pushes to `main` that touch packaging run
+the same builds and tests without publishing.
+
+Each package records its format in `/usr/lib/portal/package-format`. The
+app checks the latest release every few hours (it can be turned off under
+Settings › General), shows an **Update** button, downloads the package for
+its own format and architecture as the user, and passes it to `portald`.
+The service installs it with apt, dnf, zypper or pacman, only when it is
+signed with the release key in `packaging/update-key.pub`, is named
+`portal`, and is newer than what's installed. The install runs in its own
+systemd unit, so it survives the service restarting itself.
 
 To publish a version:
 
