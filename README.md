@@ -213,6 +213,12 @@ Pick apps, domains, IPs/networks and whole countries, then either
 **only** for them. Rule changes apply to the running connection; switching
 between the two modes reconnects.
 
+Open connections follow added rules right away: apps keep the addresses
+they already looked up, so those are split too, and connections the
+change would strand are closed so their apps reconnect on the right side.
+Removed rules and app changes leave working connections alone until you
+press **Apply** in the split settings (or run `portal split apply`).
+
 How it works (`crates/portald/src/split`):
 
 - An nftables table, `inet portalsplit`, marks split packets in a
@@ -227,6 +233,8 @@ How it works (`crates/portald/src/split`):
   on `127.0.0.153`. Split names are asked on the side they'll use (so CDNs
   answer with nearby servers) and their addresses go into an nft set with a
   timeout before the answer is returned.
+- Open connections: `ss -K` closes the affected sockets (never
+  OpenVPN's own), which apps see as a reset.
 - Apps: processes are found by executable once a second and moved into the
   `/sys/fs/cgroup/portal-split` cgroup, which the rules match.
   `portal bypass -- <command>` starts anything in it directly.
