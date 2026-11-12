@@ -92,6 +92,16 @@ pub struct Status {
     /// DNS servers in use for the tunnel, once connected.
     #[serde(default)]
     pub dns_servers: Vec<String>,
+    /// Split tunneling rules are applied to the running connection.
+    #[serde(default)]
+    pub split_active: bool,
+    /// Split settings changed in a way that needs a reconnect (switching
+    /// to or from include mode).
+    #[serde(default)]
+    pub split_needs_reconnect: bool,
+    /// Processes currently split by app rules or `tunnel bypass`.
+    #[serde(default)]
+    pub split_processes: usize,
 }
 
 /// When the kill switch blocks traffic outside the tunnel.
@@ -134,6 +144,39 @@ pub struct Settings {
     /// While connected, send all DNS through the tunnel and block port 53
     /// and 853 everywhere else.
     pub dns_leak_protection: bool,
+    pub split: SplitSettings,
+}
+
+/// Which side of the tunnel the listed traffic goes to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitMode {
+    /// Everything uses the VPN except the listed apps and hosts.
+    #[default]
+    Exclude,
+    /// Only the listed apps and hosts use the VPN.
+    Include,
+}
+
+/// An app whose traffic is split, matched by executable name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SplitApp {
+    pub name: String,
+    /// Executable path as installed, e.g. `/usr/bin/telegram-desktop`.
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SplitSettings {
+    pub enabled: bool,
+    pub mode: SplitMode,
+    pub apps: Vec<SplitApp>,
+    /// Domains (`example.com` also covers subdomains, `*.ir` a whole TLD),
+    /// IP addresses and CIDR blocks.
+    pub hosts: Vec<String>,
+    /// ISO country codes whose IP ranges are split, e.g. `IR`.
+    pub countries: Vec<String>,
 }
 
 impl Default for Settings {
@@ -144,6 +187,7 @@ impl Default for Settings {
             block_ipv6: true,
             dns: DnsMode::Vpn,
             dns_leak_protection: true,
+            split: SplitSettings::default(),
         }
     }
 }
@@ -151,6 +195,25 @@ impl Default for Settings {
 impl Settings {
     /// Check values that came from a client.
     pub fn validate(&self) -> Result<(), String> {
+        if self.split.apps.len() > 200
+            || self.split.hosts.len() > 2000
+            || self.split.countries.len() > 20
+        {
+            return Err("That's too many split tunneling rules.".into());
+        }
+        for h in &self.split.hosts {
+            crate::split::Rule::parse(h)?;
+        }
+        for c in &self.split.countries {
+            if c.len() != 2 || !c.chars().all(|ch| ch.is_ascii_uppercase()) {
+                return Err(format!("`{c}` isn't a two-letter country code."));
+            }
+        }
+        for a in &self.split.apps {
+            if !a.path.starts_with('/') || a.path.contains('\n') {
+                return Err(format!("`{}` isn't an absolute path.", a.path));
+            }
+        }
         if let DnsMode::Custom(servers) = &self.dns {
             if servers.is_empty() {
                 return Err("Add at least one DNS server.".into());

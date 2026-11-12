@@ -7,6 +7,7 @@ mod dns;
 mod firewall;
 mod manager;
 mod profiles;
+mod split;
 mod update;
 
 use std::path::PathBuf;
@@ -96,6 +97,7 @@ async fn main() -> Result<()> {
     let platform = Platform {
         system: !args.session,
         settings_path: state_dir.join("settings.json"),
+        geoip_dir: cache_dir.join("geoip"),
     };
     let mgr = Manager::spawn(store, backend, notice_tx, platform);
     let iface = DaemonIface {

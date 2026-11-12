@@ -21,6 +21,8 @@ trait Resolved {
     fn set_link_default_route(&self, ifindex: i32, enable: bool) -> zbus::Result<()>;
     #[zbus(name = "SetLinkDNSOverTLS")]
     fn set_link_dns_over_tls(&self, ifindex: i32, mode: &str) -> zbus::Result<()>;
+    #[zbus(property, name = "DNS")]
+    fn dns(&self) -> zbus::Result<Vec<(i32, i32, Vec<u8>)>>;
 }
 
 const AF_INET: i32 = 2;
@@ -39,30 +41,75 @@ fn encode(ip: &IpAddr) -> (i32, Vec<u8>) {
     }
 }
 
-/// Point the tunnel link at `servers` and make it the route for all lookups.
-/// `search` are extra search domains pushed by the server.
-pub async fn configure(iface: &str, servers: &[IpAddr], search: &[String]) -> Result<()> {
+/// How the tunnel link should take part in DNS.
+#[derive(Debug, Clone)]
+pub struct LinkDns {
+    pub servers: Vec<IpAddr>,
+    /// Routing domains: `.` sends every lookup here; split include mode
+    /// lists only the split domains.
+    pub routing: Vec<String>,
+    /// Extra search domains pushed by the server.
+    pub search: Vec<String>,
+    /// Use this link for names no routing domain matches.
+    pub default_route: bool,
+}
+
+pub async fn configure(iface: &str, cfg: &LinkDns) -> Result<()> {
     let idx = ifindex(iface)?;
     let conn = zbus::Connection::system().await?;
     let r = ResolvedProxy::new(&conn)
         .await
         .context("systemd-resolved isn't available")?;
-    let addrs: Vec<(i32, Vec<u8>)> = servers.iter().map(encode).collect();
+    let addrs: Vec<(i32, Vec<u8>)> = cfg.servers.iter().map(encode).collect();
     r.set_link_dns(idx, &addrs)
         .await
         .context("setting tunnel DNS servers")?;
-    let mut domains: Vec<(&str, bool)> = vec![(".", true)];
-    domains.extend(search.iter().map(|d| (d.as_str(), false)));
+    let mut domains: Vec<(&str, bool)> = cfg.routing.iter().map(|d| (d.as_str(), true)).collect();
+    domains.extend(cfg.search.iter().map(|d| (d.as_str(), false)));
     r.set_link_domains(idx, &domains)
         .await
         .context("setting tunnel DNS domains")?;
-    r.set_link_default_route(idx, true).await?;
+    r.set_link_default_route(idx, cfg.default_route).await?;
     // Plain DNS inside the tunnel; most VPN resolvers don't speak DoT.
     if let Err(e) = r.set_link_dns_over_tls(idx, "no").await {
         warn!("resolved: {e}");
     }
-    info!("DNS for {iface}: {servers:?}");
+    info!(
+        "DNS for {iface}: {:?} (routing {:?})",
+        cfg.servers, cfg.routing
+    );
     Ok(())
+}
+
+/// The resolvers configured for every link except `iface`, plus the global
+/// ones: what the physical network uses.
+pub async fn system_servers(iface: &str) -> Vec<IpAddr> {
+    let skip = ifindex(iface).unwrap_or(-1);
+    let Ok(conn) = zbus::Connection::system().await else {
+        return vec![];
+    };
+    let Ok(r) = ResolvedProxy::new(&conn).await else {
+        return vec![];
+    };
+    let Ok(list) = r.dns().await else {
+        return vec![];
+    };
+    let mut out: Vec<IpAddr> = list
+        .into_iter()
+        .filter(|(idx, _, _)| *idx != skip)
+        .filter_map(|(_, family, bytes)| decode(family, &bytes))
+        .filter(|ip| !ip.is_loopback())
+        .collect();
+    out.dedup();
+    out
+}
+
+fn decode(family: i32, bytes: &[u8]) -> Option<IpAddr> {
+    match (family, bytes.len()) {
+        (AF_INET, 4) => Some(IpAddr::from(<[u8; 4]>::try_from(bytes).ok()?)),
+        (AF_INET6, 16) => Some(IpAddr::from(<[u8; 16]>::try_from(bytes).ok()?)),
+        _ => None,
+    }
 }
 
 /// DNS servers and search domains from a `PUSH_REPLY` log line, e.g.

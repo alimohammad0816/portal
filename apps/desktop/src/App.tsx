@@ -98,7 +98,7 @@ export function App() {
   const [credsFor, setCredsFor] = useState<Profile | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState("firewall");
+  const [settingsTab, setSettingsTab] = useState("split");
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [dragging, setDragging] = useState(false);
   const [rates, setRates] = useState<{ rx: number[]; tx: number[] }>({ rx: [], tx: [] });
@@ -485,6 +485,17 @@ export function App() {
         </div>
       )}
 
+      {status.split_needs_reconnect && live && (
+        <div className="mx-4 mt-2 flex items-center gap-3 rounded-lg border px-3 py-2.5">
+          <span className="flex-1 text-xs leading-5 text-muted-foreground">
+            Reconnect to switch split tunneling to {settings.split.enabled && settings.split.mode === "include" ? "Only listed" : "Exclude"} mode.
+          </span>
+          <Button size="sm" variant="outline" onClick={() => selected && connectTo(selected)}>
+            Reconnect
+          </Button>
+        </div>
+      )}
+
       {/* Stats */}
       <div className="mx-4 mt-3 grid grid-cols-3 rounded-xl border">
         <div className="flex flex-col gap-[3px] border-r px-3 py-2.5">
@@ -514,19 +525,19 @@ export function App() {
           onMore={() => openSettings("firewall")}
         />
         <QuickToggle
+          label="Split"
+          sub={splitSummary(settings)}
+          checked={settings.split.enabled}
+          onChange={(on) => changeSettings({ ...settings, split: { ...settings.split, enabled: on } })}
+          onMore={() => openSettings("split")}
+          divider
+        />
+        <QuickToggle
           label="LAN"
           sub={settings.allow_lan ? "Allowed" : "Blocked"}
           checked={settings.allow_lan}
           onChange={(on) => changeSettings({ ...settings, allow_lan: on })}
           onMore={() => openSettings("firewall")}
-          divider
-        />
-        <QuickToggle
-          label="DNS guard"
-          sub={settings.dns_leak_protection ? (live && status.dns_servers[0] ? status.dns_servers[0] : "On") : "Off"}
-          checked={settings.dns_leak_protection}
-          onChange={(on) => changeSettings({ ...settings, dns_leak_protection: on })}
-          onMore={() => openSettings("dns")}
           divider
         />
       </div>
@@ -629,6 +640,14 @@ export function App() {
       />
     </div>
   );
+}
+
+function splitSummary(settings: Settings): string {
+  const s = settings.split;
+  if (!s.enabled) return "Off";
+  const n = s.apps.length + s.hosts.length + s.countries.length;
+  const rules = n === 1 ? "1 rule" : `${n} rules`;
+  return s.mode === "exclude" ? `Excluding ${rules}` : `Only ${rules}`;
 }
 
 function QuickToggle({

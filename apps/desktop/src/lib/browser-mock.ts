@@ -83,6 +83,7 @@ function startSession(id: string) {
         tunnel_ip: "10.8.0.6",
         server_ip: "203.0.113.24",
         dns_servers: settings.dns.mode === "custom" ? settings.dns.servers : ["10.8.0.1"],
+        split_active: settings.split.enabled,
       });
       addLog("MOCK: Initialization Sequence Completed");
       let rx = 0;
@@ -135,8 +136,25 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
     }
     case "get_settings":
       return settings;
+    case "list_apps":
+      return [
+        ["Firefox", "/usr/bin/firefox"],
+        ["qBittorrent", "/usr/bin/qbittorrent"],
+        ["Steam", "/usr/games/steam"],
+        ["Telegram Desktop", "/usr/bin/telegram-desktop"],
+        ["Thunderbird", "/usr/bin/thunderbird"],
+        ["Visual Studio Code", "/usr/share/code/code"],
+      ].map(([name, path]) => ({ name, path, icon: null }));
     case "set_settings":
-      settings = args.settings as SettingsT;
+      {
+        const prev = settings;
+        settings = args.settings as SettingsT;
+        if (status.state === "connected") {
+          const include = (x: SettingsT) => x.split.enabled && x.split.mode === "include";
+          const reconnect = include(prev) !== include(settings) || status.split_needs_reconnect;
+          setStatus({ split_needs_reconnect: reconnect, split_active: settings.split.enabled && !reconnect });
+        }
+      }
       if (settings.firewall !== "auto") blockedAfterDrop = false;
       emit("tunnel://settings", settings);
       setStatus({});

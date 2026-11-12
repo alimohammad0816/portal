@@ -7,7 +7,7 @@ import { Switch } from "@/components/ui/switch";
 import type { FirewallMode, Settings, Status } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-function Choice({
+export function Choice({
   selected,
   title,
   description,

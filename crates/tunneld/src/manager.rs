@@ -1,6 +1,7 @@
 //! Connection state machine. Owns the profile store, the settings and the
 //! current session; turns backend events into a [`Status`]; keeps the
-//! firewall and DNS in line with the connection; publishes changes.
+//! firewall, DNS and split tunneling in line with the connection;
+//! publishes changes.
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -12,11 +13,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 use tunnel_core::names::TUNNEL_IFACE;
-use tunnel_core::{ConnState, DnsMode, FirewallMode, Profile, Settings, Status};
+use tunnel_core::split::{DomainList, Rule};
+use tunnel_core::{ConnState, DnsMode, FirewallMode, Profile, Settings, SplitMode, Status};
 
 use crate::backend::{Backend, Credentials, Event, EventTx, SessionHandle};
+use crate::dns::LinkDns;
 use crate::firewall::{self, Firewall, Plan};
 use crate::profiles::{ProfileStore, write_private};
+use crate::split::{Link, Split, geoip};
 
 const LOG_LINES: usize = 500;
 
@@ -30,10 +34,12 @@ pub enum Notice {
 
 /// How the manager touches the system.
 pub struct Platform {
-    /// Load nftables rules and configure systemd-resolved. Off in session
-    /// (development) mode, where we aren't root.
+    /// Load nftables rules, configure systemd-resolved and routing. Off in
+    /// session (development) mode, where we aren't root.
     pub system: bool,
     pub settings_path: PathBuf,
+    /// Where country IP lists are cached.
+    pub geoip_dir: PathBuf,
 }
 
 pub struct Manager {
@@ -60,6 +66,15 @@ pub struct Manager {
     pushed: (Vec<IpAddr>, Vec<String>),
     /// resolved now sends lookups through the tunnel.
     dns_ready: bool,
+
+    split: Split,
+    /// Whether this session's OpenVPN runs without its own routes (include
+    /// mode). Fixed for the session.
+    session_include: bool,
+    /// Country ranges currently loaded, and for which countries.
+    geo: (Vec<String>, Vec<String>),
+    /// The physical network's resolvers, learned when DNS was applied.
+    direct_dns: Vec<IpAddr>,
 }
 
 pub type Shared = Arc<Mutex<Manager>>;
@@ -79,6 +94,10 @@ fn load_settings(path: &PathBuf) -> Settings {
         }),
         Err(_) => Settings::default(),
     }
+}
+
+fn wants_include(s: &Settings) -> bool {
+    s.split.enabled && s.split.mode == SplitMode::Include
 }
 
 impl Manager {
@@ -110,14 +129,19 @@ impl Manager {
             notices,
             settings,
             firewall: Firewall::new(platform.system),
+            split: Split::new(platform.system, daemon_cgroup.clone()),
             platform,
             daemon_cgroup,
             resolver_cgroup,
             blocked_after_drop: false,
             pushed: (Vec::new(), Vec::new()),
             dns_ready: false,
+            session_include: false,
+            geo: (Vec::new(), Vec::new()),
+            direct_dns: Vec::new(),
         };
         mgr.sync_firewall();
+        mgr.load_geo();
         let mgr = Arc::new(Mutex::new(mgr));
         let weak = Arc::downgrade(&mgr);
         tokio::spawn(async move {
@@ -164,24 +188,119 @@ impl Manager {
 
     pub fn set_settings(&mut self, new: Settings) -> Result<Settings> {
         new.validate().map_err(|e| anyhow!(e))?;
-        let dns_changed = new.dns != self.settings.dns;
-        write_private(
+        let old = std::mem::replace(&mut self.settings, new.clone());
+        if let Err(e) = write_private(
             &self.platform.settings_path,
             &serde_json::to_vec_pretty(&new)?,
         )
-        .context("saving settings")?;
+        .context("saving settings")
+        {
+            self.settings = old;
+            return Err(e);
+        }
         info!("settings changed: {new:?}");
-        self.settings = new;
         if self.settings.firewall != FirewallMode::Auto {
             self.blocked_after_drop = false;
         }
-        if dns_changed && self.status.state == ConnState::Connected {
-            self.apply_dns();
+        if old.split.countries != new.split.countries {
+            self.load_geo();
+        }
+        if self.status.state == ConnState::Connected {
+            self.apply_split_change(&old);
+            if new.dns != old.dns || new.split.enabled != old.split.enabled {
+                self.apply_dns();
+            }
         }
         self.sync_firewall();
         self.publish();
         let _ = self.notices.send(Notice::Settings(self.settings.clone()));
         Ok(self.settings.clone())
+    }
+
+    /// Bring split tunneling on the running connection in line with the
+    /// settings, as far as possible without reconnecting.
+    fn apply_split_change(&mut self, old: &Settings) {
+        let s = self.settings.split.clone();
+        if wants_include(&self.settings) != self.session_include {
+            // OpenVPN's routes were set up for the other mode.
+            self.status.split_needs_reconnect = true;
+            return;
+        }
+        self.status.split_needs_reconnect = false;
+        let result = match (old.split.enabled, s.enabled, self.split.mode()) {
+            (_, false, Some(_)) => {
+                self.split.stop();
+                Ok(())
+            }
+            (_, true, Some(mode)) if mode == s.mode => self.split.update(&s, &self.geo.1),
+            (_, true, _) => self.start_split(),
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            self.split_failed(e);
+        }
+        self.refresh_split_status();
+    }
+
+    fn start_split(&mut self) -> Result<()> {
+        let link = Link {
+            server_ip: self.status.server_ip.clone(),
+            vpn_dns: self.vpn_dns(),
+            direct_dns: self.direct_dns.clone(),
+        };
+        self.split.start(&self.settings.split, &self.geo.1, &link)
+    }
+
+    fn split_failed(&mut self, e: anyhow::Error) {
+        warn!("split tunneling: {e:#}");
+        self.push_log(format!("Split tunneling couldn't start: {e:#}"));
+        self.status.error = Some(format!("Split tunneling: {e:#}"));
+    }
+
+    fn refresh_split_status(&mut self) {
+        self.status.split_active = self.split.mode().is_some();
+        self.status.split_processes = self.split.apps_moved();
+    }
+
+    /// Load country lists in the background.
+    fn load_geo(&mut self) {
+        let countries = self.settings.split.countries.clone();
+        if countries == self.geo.0 {
+            return;
+        }
+        if countries.is_empty() {
+            self.geo = (Vec::new(), Vec::new());
+            return;
+        }
+        let (dir, events, seq) = (
+            self.platform.geoip_dir.clone(),
+            self.events.clone(),
+            self.seq,
+        );
+        tokio::spawn(async move {
+            let mut networks = Vec::new();
+            for c in &countries {
+                match geoip::networks(&dir, c).await {
+                    Ok(n) => networks.extend(n),
+                    Err(e) => warn!("country list {c}: {e:#}"),
+                }
+            }
+            let _ = events.send((
+                seq,
+                Event::GeoLoaded {
+                    countries,
+                    networks,
+                },
+            ));
+        });
+    }
+
+    /// Move the calling process into the split cgroup (`tunnel bypass`).
+    pub fn bypass(&mut self, pid: u32) -> Result<()> {
+        self.split.bypass(pid)?;
+        self.refresh_split_status();
+        self.publish();
+        Ok(())
     }
 
     /// First half of connecting: validate, take the old session out so the
@@ -199,12 +318,14 @@ impl Manager {
             bail!("This profile needs a username and password.");
         }
         let old = self.session.take();
+        self.split.stop();
         self.seq += 1;
         self.user_stopped = false;
         self.last_bytes = None;
         self.blocked_after_drop = false;
         self.pushed = (Vec::new(), Vec::new());
         self.dns_ready = false;
+        self.session_include = wants_include(&self.settings);
         self.status = Status {
             state: ConnState::Connecting,
             profile_id: Some(id.to_string()),
@@ -227,9 +348,16 @@ impl Manager {
             .store
             .config_path(id)
             .ok_or_else(|| anyhow!("profile disappeared"))?;
+        // Include mode: OpenVPN must not route anything itself; split rules
+        // decide what enters the tunnel.
+        let extra = if self.session_include {
+            vec!["--route-noexec".to_string()]
+        } else {
+            Vec::new()
+        };
         match self
             .backend
-            .start(self.seq, config, creds, self.events.clone())
+            .start(self.seq, config, creds, extra, self.events.clone())
         {
             Ok(handle) => {
                 self.session = Some(handle);
@@ -255,13 +383,16 @@ impl Manager {
         }
         let handle = self.session.take()?;
         self.user_stopped = true;
+        self.split.stop();
+        self.refresh_split_status();
         self.status.state = ConnState::Disconnecting;
         self.publish();
         Some(handle)
     }
 
-    /// Remove our firewall rules unless they're meant to outlive us.
+    /// Remove our rules unless they're meant to outlive us.
     pub fn shutdown(&mut self) {
+        self.split.stop();
         if self.settings.firewall != FirewallMode::Always {
             self.firewall.clear();
         }
@@ -275,17 +406,21 @@ impl Manager {
             FirewallMode::Auto => active || self.blocked_after_drop,
         };
         let connected = self.status.state == ConnState::Connected;
+        let split = self.split.mode();
         Plan {
             block,
             iface: TUNNEL_IFACE.into(),
             connected,
             allow_lan: self.settings.allow_lan,
             block_ipv6: self.settings.block_ipv6,
-            // Only once resolved uses the tunnel; otherwise lookups would
-            // have nowhere to go.
-            dns_guard: self.settings.dns_leak_protection && self.dns_ready,
+            // Only once resolved uses the tunnel, and never in include
+            // mode, where most lookups are meant to stay outside.
+            dns_guard: self.settings.dns_leak_protection
+                && self.dns_ready
+                && split != Some(SplitMode::Include),
             daemon_cgroup: self.daemon_cgroup.clone(),
             resolver_cgroup: self.resolver_cgroup.clone(),
+            split,
         }
     }
 
@@ -299,16 +434,33 @@ impl Manager {
         self.status.internet_blocked = plan.block && !plan.connected;
     }
 
-    /// Point DNS at the tunnel. Runs in the background and reports back
-    /// through the event channel.
-    fn apply_dns(&mut self) {
-        let servers: Vec<IpAddr> = match &self.settings.dns {
+    fn vpn_dns(&self) -> Vec<IpAddr> {
+        match &self.settings.dns {
             DnsMode::Custom(list) => list.iter().filter_map(|s| s.parse().ok()).collect(),
             DnsMode::Vpn => self.pushed.0.clone(),
-        };
+        }
+    }
+
+    /// Point DNS at the tunnel (or at the split DNS proxy). Runs in the
+    /// background and reports back through the event channel.
+    fn apply_dns(&mut self) {
+        let servers = self.vpn_dns();
         let search = self.pushed.1.clone();
         let (seq, events, system) = (self.seq, self.events.clone(), self.platform.system);
-        if servers.is_empty() {
+        let proxy = self.split.dns_listen();
+        let split_mode = self.split.mode();
+        let split_domains: Vec<String> = DomainList::new(
+            &self
+                .settings
+                .split
+                .hosts
+                .iter()
+                .filter_map(|h| Rule::parse(h).ok())
+                .collect::<Vec<_>>(),
+        )
+        .suffixes()
+        .to_vec();
+        if servers.is_empty() && proxy.is_none() {
             self.push_log("The server didn't push DNS servers; using the system's DNS.".into());
             self.dns_ready = false;
             self.status.dns_servers.clear();
@@ -316,8 +468,31 @@ impl Manager {
         }
         tokio::spawn(async move {
             let shown: Vec<String> = servers.iter().map(ToString::to_string).collect();
+            let mut direct = Vec::new();
             let result = if system {
-                crate::dns::configure(TUNNEL_IFACE, &servers, &search)
+                // Learn the physical resolvers before the tunnel takes over.
+                direct = crate::dns::system_servers(TUNNEL_IFACE).await;
+                let cfg = match (proxy, split_mode) {
+                    (Some(p), Some(SplitMode::Include)) => LinkDns {
+                        servers: vec![p],
+                        routing: split_domains,
+                        search: Vec::new(),
+                        default_route: false,
+                    },
+                    (Some(p), _) => LinkDns {
+                        servers: vec![p],
+                        routing: vec![".".into()],
+                        search,
+                        default_route: true,
+                    },
+                    (None, _) => LinkDns {
+                        servers,
+                        routing: vec![".".into()],
+                        search,
+                        default_route: true,
+                    },
+                };
+                crate::dns::configure(TUNNEL_IFACE, &cfg)
                     .await
                     .map_err(|e| format!("{e:#}"))
             } else {
@@ -327,6 +502,7 @@ impl Manager {
                 seq,
                 Event::DnsApplied {
                     servers: shown,
+                    direct,
                     result,
                 },
             ));
@@ -336,6 +512,21 @@ impl Manager {
     fn on_event(&mut self, seq: u64, event: Event) {
         if let Event::Log(line) = &event {
             self.push_log(line.clone());
+        }
+        // Country lists don't belong to a session.
+        if let Event::GeoLoaded {
+            countries,
+            networks,
+        } = event
+        {
+            if countries == self.settings.split.countries {
+                self.geo = (countries, networks);
+                if let Err(e) = self.split.update(&self.settings.split, &self.geo.1) {
+                    self.split_failed(e);
+                }
+                self.publish();
+            }
+            return;
         }
         if seq != self.seq {
             return;
@@ -356,14 +547,23 @@ impl Manager {
                         if let Some(id) = self.status.profile_id.clone() {
                             self.store.mark_connected(&id);
                         }
+                        if self.settings.split.enabled
+                            && let Err(e) = self.start_split()
+                        {
+                            self.split_failed(e);
+                        }
+                        self.refresh_split_status();
                         self.apply_dns();
                     }
                     "EXITING" => self.status.state = ConnState::Disconnecting,
                     _ if self.status.state != ConnState::Disconnecting => {
-                        // Includes RECONNECTING: the old DNS route is gone.
+                        // Includes RECONNECTING: the old DNS route is gone,
+                        // and routes are rebuilt when the tunnel is back.
                         self.status.state = ConnState::Connecting;
                         self.status.connected_since = None;
                         self.dns_ready = false;
+                        self.split.stop();
+                        self.refresh_split_status();
                     }
                     _ => {}
                 }
@@ -381,6 +581,7 @@ impl Manager {
                 self.last_bytes = Some((t, rx, tx));
                 self.status.bytes_in = rx;
                 self.status.bytes_out = tx;
+                self.status.split_processes = self.split.apps_moved();
                 self.publish();
             }
             Event::Log(line) => {
@@ -392,15 +593,26 @@ impl Manager {
                         && !self.dns_ready
                         && self.settings.dns == DnsMode::Vpn
                     {
+                        let (vpn, direct) = (self.vpn_dns(), self.direct_dns.clone());
+                        self.split.set_dns(&vpn, &direct);
                         self.apply_dns();
                     }
                 }
             }
-            Event::DnsApplied { servers, result } => {
+            Event::DnsApplied {
+                servers,
+                direct,
+                result,
+            } => {
                 match result {
                     Ok(()) => {
                         self.dns_ready = self.status.state == ConnState::Connected;
                         self.status.dns_servers = servers;
+                        if !direct.is_empty() {
+                            self.direct_dns = direct;
+                        }
+                        let vpn = self.vpn_dns();
+                        self.split.set_dns(&vpn, &self.direct_dns);
                     }
                     Err(e) => {
                         warn!("DNS: {e}");
@@ -411,12 +623,14 @@ impl Manager {
                 self.sync_firewall();
                 self.publish();
             }
+            Event::GeoLoaded { .. } => {}
             Event::Fatal(msg) => {
                 self.status.error = Some(msg);
                 self.publish();
             }
             Event::Exited => {
                 self.session = None;
+                self.split.stop();
                 let dropped = !self.user_stopped;
                 let error = self.status.error.take().or_else(|| {
                     dropped.then(|| {
@@ -454,6 +668,7 @@ impl Manager {
 mod tests {
     use super::*;
     use crate::backend::Mock;
+    use tunnel_core::SplitSettings;
 
     const CFG: &str = "client\nremote de-fra-02.example.net 1194\n";
 
@@ -476,6 +691,7 @@ mod tests {
         let platform = Platform {
             system: false,
             settings_path,
+            geoip_dir: dir.path().join("geoip"),
         };
         Fixture {
             mgr: Manager::spawn(store, Arc::new(Mock), tx, platform),
@@ -533,6 +749,7 @@ mod tests {
         assert_eq!(s.dns_servers, vec!["10.8.0.1"]);
         assert!(s.firewall_active, "Auto firewall is on while connected");
         assert!(!s.internet_blocked);
+        assert!(!s.split_active);
         assert!(f.mgr.lock().await.profiles()[0].last_connected_at.is_some());
 
         let h = f.mgr.lock().await.begin_disconnect().unwrap();
@@ -549,16 +766,14 @@ mod tests {
     async fn kill_switch_holds_after_a_drop() {
         let mut f = setup().await;
         connect(&mut f).await;
-        {
-            let mut m = f.mgr.lock().await;
-            let seq = m.seq;
-            m.session = None; // the backend went away on its own
-            m.on_event(seq, Event::Exited);
-            assert!(m.status().internet_blocked);
-            assert!(m.status().error.is_some());
-            assert!(m.begin_disconnect().is_none());
-            assert!(!m.status().internet_blocked, "disconnect lifts the block");
-        }
+        let mut m = f.mgr.lock().await;
+        let seq = m.seq;
+        m.session = None; // the backend went away on its own
+        m.on_event(seq, Event::Exited);
+        assert!(m.status().internet_blocked);
+        assert!(m.status().error.is_some());
+        assert!(m.begin_disconnect().is_none());
+        assert!(!m.status().internet_blocked, "disconnect lifts the block");
     }
 
     #[tokio::test]
@@ -590,6 +805,11 @@ mod tests {
             ..Settings::default()
         };
         assert!(f.mgr.lock().await.set_settings(bad).is_err());
+        assert_eq!(
+            f.mgr.lock().await.settings(),
+            &new,
+            "a rejected change leaves settings alone"
+        );
     }
 
     #[tokio::test]
@@ -608,6 +828,58 @@ mod tests {
             .unwrap();
         wait_for(&mut f.rx, |s| !s.dns_servers.is_empty()).await;
         assert!(f.mgr.lock().await.plan().dns_guard);
+    }
+
+    fn split(mode: SplitMode) -> Settings {
+        Settings {
+            split: SplitSettings {
+                enabled: true,
+                mode,
+                hosts: vec!["*.ir".into()],
+                ..SplitSettings::default()
+            },
+            ..Settings::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn split_exclude_starts_with_the_tunnel_and_changes_live() {
+        let mut f = setup_with(CFG, Some(split(SplitMode::Exclude))).await;
+        let s = connect(&mut f).await;
+        assert!(s.split_active);
+        assert_eq!(f.mgr.lock().await.plan().split, Some(SplitMode::Exclude));
+
+        // Turning it off and on again needs no reconnect in exclude mode.
+        let off = Settings::default();
+        let s = {
+            f.mgr.lock().await.set_settings(off).unwrap();
+            f.mgr.lock().await.status().clone()
+        };
+        assert!(!s.split_active && !s.split_needs_reconnect);
+        f.mgr
+            .lock()
+            .await
+            .set_settings(split(SplitMode::Exclude))
+            .unwrap();
+        assert!(f.mgr.lock().await.status().split_active);
+
+        // Include mode needs OpenVPN without routes: reconnect.
+        f.mgr
+            .lock()
+            .await
+            .set_settings(split(SplitMode::Include))
+            .unwrap();
+        assert!(f.mgr.lock().await.status().split_needs_reconnect);
+    }
+
+    #[tokio::test]
+    async fn split_include_disables_dns_guard() {
+        let mut f = setup_with(CFG, Some(split(SplitMode::Include))).await;
+        let s = connect(&mut f).await;
+        assert!(s.split_active);
+        let m = f.mgr.lock().await;
+        assert!(m.session_include);
+        assert!(!m.plan().dns_guard);
     }
 
     #[tokio::test]

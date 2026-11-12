@@ -8,6 +8,9 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
+use tunnel_core::SplitMode;
+
+use crate::split::net::{MARK_DIRECT, MARK_TUNNEL};
 
 const TABLE: &str = "tunnelvpn";
 
@@ -30,6 +33,8 @@ pub struct Plan {
     /// cgroup of systemd-resolved, allowed to resolve the server's name
     /// while connecting.
     pub resolver_cgroup: Option<String>,
+    /// Split tunneling mode while it's running.
+    pub split: Option<SplitMode>,
 }
 
 impl Plan {
@@ -49,7 +54,7 @@ fn cgroup_rule(path: &str) -> String {
 
 /// The nft script for a plan. Always starts by removing the old table.
 pub fn ruleset(plan: &Plan) -> String {
-    let mut s = format!("table inet {TABLE} {{}}\ndelete table inet {TABLE}\n");
+    let s = format!("table inet {TABLE} {{}}\ndelete table inet {TABLE}\n");
     if plan.is_empty() {
         return s;
     }
@@ -58,16 +63,33 @@ pub fn ruleset(plan: &Plan) -> String {
         "oifname \"lo\" accept".into(),
         format!("oifname \"{iface}\" accept"),
     ];
+    // The daemon's own traffic: OpenVPN reaching the server, and the split
+    // DNS proxy asking the physical network's resolvers.
+    if let Some(cg) = &plan.daemon_cgroup {
+        rules.push(format!("{} accept", cgroup_rule(cg)));
+    }
 
     if plan.connected && plan.dns_guard {
         // DNS (plain and DoT) may only leave through the tunnel.
         rules.push("meta l4proto { tcp, udp } th dport { 53, 853 } reject with icmpx type admin-prohibited".into());
     }
 
-    if plan.block {
-        if let Some(cg) = &plan.daemon_cgroup {
-            rules.push(format!("{} accept", cgroup_rule(cg)));
+    match plan.split {
+        // Split traffic is meant to go around the tunnel.
+        Some(SplitMode::Exclude) if plan.connected => {
+            rules.push(format!("meta mark {MARK_DIRECT:#x} accept"))
         }
+        // Only split traffic uses the tunnel; the kill switch guards just that.
+        Some(SplitMode::Include) if plan.connected && plan.block => {
+            rules.push(format!(
+                "meta mark {MARK_TUNNEL:#x} reject with icmpx type admin-prohibited"
+            ));
+            return finish(s, rules);
+        }
+        _ => {}
+    }
+
+    if plan.block {
         if !plan.connected
             && let Some(cg) = &plan.resolver_cgroup
         {
@@ -88,7 +110,7 @@ pub fn ruleset(plan: &Plan) -> String {
             rules.push(format!("ip6 daddr {{ {LAN_V6} }} accept"));
         }
         rules.push("reject with icmpx type admin-prohibited".into());
-    } else if plan.connected && plan.block_ipv6 {
+    } else if plan.connected && plan.block_ipv6 && plan.split != Some(SplitMode::Include) {
         if plan.allow_lan {
             rules.push(format!("ip6 daddr {{ {LAN_V6} }} accept"));
         }
@@ -99,6 +121,10 @@ pub fn ruleset(plan: &Plan) -> String {
         rules.push("meta nfproto ipv6 reject with icmpx type admin-prohibited".into());
     }
 
+    finish(s, rules)
+}
+
+fn finish(mut s: String, rules: Vec<String>) -> String {
     s.push_str(&format!("table inet {TABLE} {{\n  chain output {{\n    type filter hook output priority filter; policy accept;\n"));
     for r in rules {
         s.push_str("    ");
@@ -258,8 +284,8 @@ mod tests {
         let guard = s.find("th dport { 53, 853 } reject").unwrap();
         let daemon = s.find("tunneld.service").unwrap();
         assert!(
-            guard < daemon,
-            "DNS guard comes before the daemon exception"
+            daemon < guard,
+            "the daemon's split DNS proxy may reach physical resolvers"
         );
     }
 
@@ -281,7 +307,6 @@ mod tests {
         });
         assert!(s.contains("th dport { 53, 853 } reject"));
         assert!(s.contains("meta nfproto ipv6 reject"));
-        assert!(!s.contains("tunneld.service"));
         let off = Plan {
             connected: true,
             block_ipv6: false,
@@ -358,5 +383,34 @@ mod tests {
                 assert!(String::from_utf8_lossy(&out.stdout).contains("chain output"));
             }
         }
+    }
+
+    #[test]
+    fn split_exclude_lets_marked_traffic_out() {
+        let s = ruleset(&Plan {
+            block: true,
+            connected: true,
+            split: Some(SplitMode::Exclude),
+            ..base()
+        });
+        let mark = s.find("meta mark 0x5470 accept").unwrap();
+        let reject = s.rfind("reject with icmpx").unwrap();
+        assert!(mark < reject);
+    }
+
+    #[test]
+    fn split_include_guards_only_marked_traffic() {
+        let s = ruleset(&Plan {
+            block: true,
+            connected: true,
+            split: Some(SplitMode::Include),
+            ..base()
+        });
+        assert!(s.contains("meta mark 0x5471 reject"));
+        assert_eq!(
+            s.matches("reject").count(),
+            2,
+            "DNS guard + marked traffic only:\n{s}"
+        );
     }
 }

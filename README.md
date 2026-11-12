@@ -151,14 +151,53 @@ From the CLI:
 tunnel settings firewall=always lan=off dns=1.1.1.1,9.9.9.9
 ```
 
+## Split tunneling
+
+Pick apps, domains, IPs/networks and whole countries, then either
+**exclude** them from the VPN (everything else uses it) or use the VPN
+**only** for them. Rule changes apply to the running connection; switching
+between the two modes reconnects.
+
+How it works (`crates/tunneld/src/split`):
+
+- An nftables table, `inet tunnelsplit`, marks split packets in a
+  `route` chain (so the kernel re-routes them) and masquerades them, since
+  sockets pick their source address before the mark is set. Connection
+  tracking keeps a flow on the side it started on.
+- Policy routing sends marked packets elsewhere. Exclude: `main` without
+  OpenVPN's `0/1`+`128/1` (LAN routes still apply), then a table with the
+  physical gateway. Include: OpenVPN runs with `--route-noexec`, and marked
+  packets use a table whose default route is the tunnel.
+- Domains: systemd-resolved sends the tunnel's lookups to a small forwarder
+  on `127.0.0.153`. Split names are asked on the side they'll use (so CDNs
+  answer with nearby servers) and their addresses go into an nft set with a
+  timeout before the answer is returned.
+- Apps: processes are found by executable once a second and moved into the
+  `/sys/fs/cgroup/tunnel-split` cgroup, which the rules match.
+  `tunnel bypass -- <command>` starts anything in it directly.
+- Countries: RIR delegation lists (ipverse, ipdeny as a fallback), cached in
+  `/var/cache/tunneld/geoip` and refreshed weekly.
+
+```bash
+tunnel split add '*.ir' country:IR /usr/bin/telegram-desktop
+```
+
+```bash
+tunnel split on
+```
+
+The routing tests run against the real kernel in a throwaway network
+namespace:
+
+```bash
+cargo test -p tunneld --no-run && unshare -rn target/debug/deps/tunneld-* --ignored --test-threads=1 netns
+```
+
 ## Roadmap
 
 1. Done: import, connect/disconnect, location list with latency, live
    status, tray, logs, signed updates.
 2. Done: kill switch, DNS leak protection, IPv6 leak blocking, allow-LAN.
-3. Split tunneling: profiles run with `route-nopull`; routes live in a
-   dedicated table selected by `fwmark`, nftables sets hold excluded IPs,
-   hostnames (via a DNS forwarder) and apps (cgroup v2), so rule changes
-   apply live.
+3. Done: split tunneling by app, domain, IP/network and country.
 4. Credentials in GNOME Keyring, trusted networks, proxy gateway, GNOME
    Shell quick-settings tile, server geolocation.

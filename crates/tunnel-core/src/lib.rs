@@ -6,6 +6,10 @@ pub mod model;
 pub mod names;
 pub mod ovpn;
 pub mod proxy;
+pub mod split;
 
-pub use model::{AuthKind, ConnState, DnsMode, FirewallMode, Profile, Settings, Status};
+pub use model::{
+    AuthKind, ConnState, DnsMode, FirewallMode, Profile, Settings, SplitApp, SplitMode,
+    SplitSettings, Status,
+};
 pub use proxy::DaemonProxy;

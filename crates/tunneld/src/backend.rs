@@ -35,7 +35,14 @@ pub enum Event {
     /// manager's own DNS task, not by a backend.
     DnsApplied {
         servers: Vec<String>,
+        /// The physical network's resolvers, for split DNS.
+        direct: Vec<std::net::IpAddr>,
         result: Result<(), String>,
+    },
+    /// Country IP ranges were loaded (manager's own task).
+    GeoLoaded {
+        countries: Vec<String>,
+        networks: Vec<String>,
     },
     /// The session is over.
     Exited,
@@ -72,6 +79,7 @@ pub trait Backend: Send + Sync {
         seq: u64,
         config: PathBuf,
         creds: Credentials,
+        extra_args: Vec<String>,
         events: EventTx,
     ) -> Result<SessionHandle>;
 }
@@ -107,6 +115,7 @@ impl Backend for OpenVpn {
         seq: u64,
         config: PathBuf,
         creds: Credentials,
+        extra_args: Vec<String>,
         events: EventTx,
     ) -> Result<SessionHandle> {
         std::fs::create_dir_all(&self.runtime_dir)
@@ -127,6 +136,7 @@ impl Backend for OpenVpn {
         if self.disable_dns_updown {
             cmd.args(["--dns-updown", "disable"]);
         }
+        cmd.args(&extra_args);
         let mut child = cmd
             .arg("--management")
             .arg(&socket)
@@ -367,6 +377,7 @@ impl Backend for Mock {
         seq: u64,
         _config: PathBuf,
         _creds: Credentials,
+        _extra_args: Vec<String>,
         events: EventTx,
     ) -> Result<SessionHandle> {
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();

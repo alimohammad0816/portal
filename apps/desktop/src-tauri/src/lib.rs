@@ -1,6 +1,7 @@
 //! Desktop shell: bridges the web UI to `tunneld` over D-Bus, owns the tray
 //! icon, and keeps running in the tray when the window is closed.
 
+mod apps;
 mod latency;
 mod updater;
 
@@ -198,6 +199,13 @@ async fn disconnect(daemon: State<'_, Daemon>) -> Result<(), String> {
 #[tauri::command]
 async fn get_status(daemon: State<'_, Daemon>) -> Result<Status, String> {
     parse(daemon.get().await?.get_status().await.map_err(err)?)
+}
+
+#[tauri::command]
+async fn list_apps() -> Result<Vec<apps::InstalledApp>, String> {
+    tauri::async_runtime::spawn_blocking(apps::installed)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -502,6 +510,7 @@ pub fn run() {
             get_log,
             get_settings,
             set_settings,
+            list_apps,
             probe_latency,
         ])
         .setup(|app| {

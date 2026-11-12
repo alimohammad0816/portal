@@ -32,6 +32,30 @@ export interface Status {
   firewall_active: boolean;
   internet_blocked: boolean;
   dns_servers: string[];
+  split_active: boolean;
+  split_needs_reconnect: boolean;
+  split_processes: number;
+}
+
+export type SplitMode = "exclude" | "include";
+
+export interface SplitApp {
+  name: string;
+  path: string;
+}
+
+export interface SplitSettings {
+  enabled: boolean;
+  mode: SplitMode;
+  apps: SplitApp[];
+  hosts: string[];
+  countries: string[];
+}
+
+export interface InstalledApp {
+  name: string;
+  path: string;
+  icon: string | null;
 }
 
 export type FirewallMode = "off" | "auto" | "always";
@@ -44,6 +68,7 @@ export interface Settings {
   block_ipv6: boolean;
   dns: DnsMode;
   dns_leak_protection: boolean;
+  split: SplitSettings;
 }
 
 export const defaultSettings: Settings = {
@@ -52,6 +77,7 @@ export const defaultSettings: Settings = {
   block_ipv6: true,
   dns: { mode: "vpn" },
   dns_leak_protection: true,
+  split: { enabled: false, mode: "exclude", apps: [], hosts: [], countries: [] },
 };
 
 export interface ImportResult {
@@ -98,4 +124,7 @@ export const emptyStatus: Status = {
   firewall_active: false,
   internet_blocked: false,
   dns_servers: [],
+  split_active: false,
+  split_needs_reconnect: false,
+  split_processes: 0,
 };

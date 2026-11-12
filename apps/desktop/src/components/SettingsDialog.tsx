@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DnsSettings, FirewallSettings } from "@/components/SecuritySettings";
+import { SplitSettings } from "@/components/SplitSettings";
 import { api, errorText, type Profile, type Settings, type Status, type UpdateInfo } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
 
@@ -220,12 +221,18 @@ export function SettingsDialog({
         </DialogHeader>
         <Tabs value={tab} onValueChange={onTabChange}>
           <TabsList className="w-full">
+            <TabsTrigger value="split">Split</TabsTrigger>
             <TabsTrigger value="firewall">Firewall</TabsTrigger>
             <TabsTrigger value="dns">DNS</TabsTrigger>
             <TabsTrigger value="profiles">Profiles</TabsTrigger>
             <TabsTrigger value="log">Log</TabsTrigger>
             <TabsTrigger value="about">About</TabsTrigger>
           </TabsList>
+          <TabsContent value="split">
+            <div className="scroll-subtle max-h-[28rem] overflow-y-auto pr-1">
+              <SplitSettings settings={settings} status={status} onChange={onSettingsChange} />
+            </div>
+          </TabsContent>
           <TabsContent value="firewall">
             <FirewallSettings settings={settings} onChange={onSettingsChange} />
           </TabsContent>

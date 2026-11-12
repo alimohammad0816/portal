@@ -41,6 +41,10 @@ pub trait Daemon {
     /// Recent OpenVPN log lines, oldest first.
     fn get_log(&self) -> zbus::Result<Vec<String>>;
 
+    /// Move the calling process (and its future children) into split
+    /// tunneling.
+    fn split_self(&self) -> zbus::Result<()>;
+
     /// Current `Settings` as JSON.
     fn get_settings(&self) -> zbus::Result<String>;
 

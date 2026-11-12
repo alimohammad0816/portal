@@ -8,7 +8,8 @@ use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use tunnel_core::ovpn;
 use tunnel_core::{
-    AuthKind, ConnState, DaemonProxy, DnsMode, FirewallMode, Profile, Settings, Status,
+    AuthKind, ConnState, DaemonProxy, DnsMode, FirewallMode, Profile, Settings, SplitApp,
+    SplitMode, SplitSettings, Status,
 };
 
 #[derive(Parser)]
@@ -58,11 +59,43 @@ enum Cmd {
     /// `tunnel settings firewall=always lan=off ipv6=on dns=1.1.1.1,9.9.9.9 dns-guard=on`.
     /// `firewall` is off, auto or always; `dns` is `vpn` or a list of servers.
     Settings { changes: Vec<String> },
+    /// Split tunneling. With no arguments, shows the rules. Examples:
+    /// `tunnel split on`, `tunnel split mode include`,
+    /// `tunnel split add '*.ir' 10.0.0.0/8 country:IR /usr/bin/telegram-desktop`,
+    /// `tunnel split remove '*.ir'`.
+    Split {
+        #[command(subcommand)]
+        action: Option<SplitCmd>,
+    },
+    /// Run a program with split tunneling applied to it (and its children),
+    /// e.g. `tunnel bypass -- firefox -P local`.
+    Bypass {
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
     /// Print the OpenVPN log.
     Log {
         /// Keep printing new lines.
         #[arg(short, long)]
         follow: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SplitCmd {
+    On,
+    Off,
+    /// `exclude` (listed things skip the VPN) or `include` (only they use it).
+    Mode {
+        mode: String,
+    },
+    /// Add domains, IPs, networks, `country:XX` or app paths.
+    Add {
+        items: Vec<String>,
+    },
+    /// Remove entries added with `add`.
+    Remove {
+        items: Vec<String>,
     },
 }
 
@@ -191,6 +224,27 @@ async fn run(cli: Cli) -> Result<()> {
                 st = serde_json::from_str(&d.set_settings(&serde_json::to_string(&st)?).await?)?;
             }
             print_settings(&st);
+        }
+        Cmd::Split { action } => {
+            let mut st: Settings = serde_json::from_str(&d.get_settings().await?)?;
+            if let Some(a) = action {
+                apply_split(&mut st.split, a)?;
+                st = serde_json::from_str(&d.set_settings(&serde_json::to_string(&st)?).await?)?;
+                let s: Status = serde_json::from_str(&d.get_status().await?)?;
+                if s.split_needs_reconnect {
+                    println!("Reconnect to switch modes.");
+                }
+            }
+            print_split(&st.split);
+        }
+        Cmd::Bypass { command } => {
+            use std::os::unix::process::CommandExt;
+            d.split_self().await?;
+            // Replace this process; the program keeps our cgroup.
+            let err = std::process::Command::new(&command[0])
+                .args(&command[1..])
+                .exec();
+            bail!("running {}: {err}", command[0]);
         }
         Cmd::Log { follow } => {
             let mut stream = if follow {
@@ -396,4 +450,69 @@ fn print_settings(st: &Settings) {
     );
     println!("dns        {dns}");
     println!("dns-guard  {}", yn(st.dns_leak_protection));
+}
+
+fn apply_split(sp: &mut SplitSettings, action: SplitCmd) -> Result<()> {
+    match action {
+        SplitCmd::On => sp.enabled = true,
+        SplitCmd::Off => sp.enabled = false,
+        SplitCmd::Mode { mode } => {
+            sp.mode = match mode.as_str() {
+                "exclude" => SplitMode::Exclude,
+                "include" | "only" => SplitMode::Include,
+                _ => bail!("mode is exclude or include"),
+            }
+        }
+        SplitCmd::Add { items } => {
+            for it in items {
+                if let Some(c) = it.strip_prefix("country:") {
+                    let c = c.to_ascii_uppercase();
+                    if !sp.countries.contains(&c) {
+                        sp.countries.push(c);
+                    }
+                } else if it.starts_with('/') {
+                    let name = std::path::Path::new(&it)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&it)
+                        .to_string();
+                    if !sp.apps.iter().any(|a| a.path == it) {
+                        sp.apps.push(SplitApp { name, path: it });
+                    }
+                } else {
+                    tunnel_core::split::Rule::parse(&it).map_err(|e| anyhow::anyhow!(e))?;
+                    if !sp.hosts.contains(&it) {
+                        sp.hosts.push(it);
+                    }
+                }
+            }
+        }
+        SplitCmd::Remove { items } => {
+            for it in items {
+                let c = it.strip_prefix("country:").map(str::to_ascii_uppercase);
+                sp.countries.retain(|x| Some(x) != c.as_ref());
+                sp.apps.retain(|a| a.path != it);
+                sp.hosts.retain(|h| *h != it);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_split(sp: &SplitSettings) {
+    let mode = match sp.mode {
+        SplitMode::Exclude => "exclude (listed things skip the VPN)",
+        SplitMode::Include => "include (only listed things use the VPN)",
+    };
+    println!("split      {}", if sp.enabled { "on" } else { "off" });
+    println!("mode       {mode}");
+    for a in &sp.apps {
+        println!("app        {}  {}", a.name, a.path);
+    }
+    for h in &sp.hosts {
+        println!("host       {h}");
+    }
+    for c in &sp.countries {
+        println!("country    {c}");
+    }
 }

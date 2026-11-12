@@ -180,6 +180,23 @@ impl DaemonIface {
         self.mgr.lock().await.log()
     }
 
+    /// Move the calling process into split tunneling (`tunnel bypass`).
+    /// Children started afterwards inherit it.
+    async fn split_self(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<()> {
+        self.authorize(conn, &hdr, ACTION_CONNECT).await?;
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| fdo::Error::AccessDenied("no sender".into()))?
+            .to_owned();
+        let bus = fdo::DBusProxy::new(conn).await?;
+        let pid = bus.get_connection_unix_process_id(sender.into()).await?;
+        self.mgr.lock().await.bypass(pid).map_err(failed)
+    }
+
     async fn get_settings(&self) -> fdo::Result<String> {
         to_json(self.mgr.lock().await.settings())
     }
