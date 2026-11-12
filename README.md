@@ -1,8 +1,14 @@
 # Portal
 
 An OpenVPN client for Linux with the conveniences of commercial VPN apps:
-import your own `.ovpn` profiles, switch locations in one click, and (next
-phase) split tunneling and a kill switch that apply without reconnecting.
+import your own `.ovpn` profiles, switch locations in one click, and use
+split tunneling and a kill switch that apply without reconnecting.
+
+<p align="center">
+  <img src="docs/screenshots/main.png" width="260" alt="Main window, connected to Frankfurt">
+  <img src="docs/screenshots/split.png" width="260" alt="Split tunneling settings">
+  <img src="docs/screenshots/network.png" width="260" alt="Kill switch and network settings">
+</p>
 
 ## Layout
 
