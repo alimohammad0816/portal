@@ -4,9 +4,10 @@
 //! and the answers' addresses are added to the nft sets before the reply
 //! goes back, so the first connection is already routed right.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -63,6 +64,48 @@ impl Sink {
                 let _ = tx.send(entries);
             }
         }
+    }
+}
+
+/// Which split names each recorded address was learned for, and until
+/// when, so a domain's addresses can be dropped from the nft sets as soon
+/// as its rule is removed instead of when their timeout runs out.
+#[derive(Debug, Default)]
+pub struct Learned(HashMap<IpAddr, HashMap<String, Instant>>);
+
+impl Learned {
+    fn add(&mut self, name: &str, entries: &[(IpAddr, u32)], now: Instant) {
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        for (ip, secs) in entries {
+            let until = now + Duration::from_secs(u64::from(*secs));
+            let slot = self
+                .0
+                .entry(*ip)
+                .or_default()
+                .entry(name.clone())
+                .or_insert(until);
+            *slot = (*slot).max(until);
+        }
+    }
+
+    /// Forget names that `domains` no longer lists and return the addresses
+    /// that are left without any, which should leave the nft sets now.
+    /// Addresses whose entries already timed out are dropped silently.
+    fn prune(&mut self, domains: &DomainList, now: Instant) -> Vec<IpAddr> {
+        let mut gone = Vec::new();
+        self.0.retain(|ip, names| {
+            names.retain(|_, until| *until > now);
+            if names.is_empty() {
+                return false;
+            }
+            names.retain(|name, _| domains.matches(name));
+            if names.is_empty() {
+                gone.push(*ip);
+                return false;
+            }
+            true
+        });
+        gone
     }
 }
 
@@ -173,7 +216,13 @@ const fn libc_einprogress() -> i32 {
 }
 
 /// Forward one query and record split answers. Always produces a reply.
-async fn resolve(query: &[u8], tcp: bool, cfg: &SharedConfig, sink: &Sink) -> Option<Vec<u8>> {
+async fn resolve(
+    query: &[u8],
+    tcp: bool,
+    cfg: &SharedConfig,
+    learned: &Mutex<Learned>,
+    sink: &Sink,
+) -> Option<Vec<u8>> {
     let name = dnsmsg::question_name(query);
     let (route, port) = {
         let c = cfg.read().ok()?;
@@ -195,6 +244,9 @@ async fn resolve(query: &[u8], tcp: bool, cfg: &SharedConfig, sink: &Sink) -> Op
                         .collect();
                     if !addrs.is_empty() {
                         debug!("split {:?}: {addrs:?}", name);
+                        if let (Some(n), Ok(mut l)) = (&name, learned.lock()) {
+                            l.add(n, &addrs, Instant::now());
+                        }
                         sink.add(addrs).await;
                     }
                 }
@@ -208,6 +260,7 @@ async fn resolve(query: &[u8], tcp: bool, cfg: &SharedConfig, sink: &Sink) -> Op
 
 pub struct Proxy {
     pub config: SharedConfig,
+    learned: Arc<Mutex<Learned>>,
     tasks: Vec<JoinHandle<()>>,
     pub addr: SocketAddr,
 }
@@ -226,8 +279,9 @@ impl Proxy {
         let udp = Arc::new(UdpSocket::from_std(std_udp)?);
         let tcp = TcpListener::from_std(std_tcp)?;
         let config = Arc::new(RwLock::new(config));
+        let learned = Arc::new(Mutex::new(Learned::default()));
 
-        let (cfg, s) = (config.clone(), sink.clone());
+        let (cfg, l, s) = (config.clone(), learned.clone(), sink.clone());
         let udp_task = tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             loop {
@@ -238,22 +292,22 @@ impl Proxy {
                     continue;
                 }
                 let query = buf[..n].to_vec();
-                let (udp, cfg, s) = (udp.clone(), cfg.clone(), s.clone());
+                let (udp, cfg, l, s) = (udp.clone(), cfg.clone(), l.clone(), s.clone());
                 tokio::spawn(async move {
-                    if let Some(r) = resolve(&query, false, &cfg, &s).await {
+                    if let Some(r) = resolve(&query, false, &cfg, &l, &s).await {
                         let _ = udp.send_to(&r, from).await;
                     }
                 });
             }
         });
 
-        let (cfg, s) = (config.clone(), sink);
+        let (cfg, l, s) = (config.clone(), learned.clone(), sink);
         let tcp_task = tokio::spawn(async move {
             loop {
                 let Ok((mut conn, _)) = tcp.accept().await else {
                     continue;
                 };
-                let (cfg, s) = (cfg.clone(), s.clone());
+                let (cfg, l, s) = (cfg.clone(), l.clone(), s.clone());
                 tokio::spawn(async move {
                     while let Ok(Ok(len)) =
                         tokio::time::timeout(Duration::from_secs(10), conn.read_u16()).await
@@ -262,7 +316,7 @@ impl Proxy {
                         if conn.read_exact(&mut q).await.is_err() || q.len() < 12 {
                             break;
                         }
-                        let Some(r) = resolve(&q, true, &cfg, &s).await else {
+                        let Some(r) = resolve(&q, true, &cfg, &l, &s).await else {
                             break;
                         };
                         if conn
@@ -280,6 +334,7 @@ impl Proxy {
 
         Ok(Proxy {
             config,
+            learned,
             tasks: vec![udp_task, tcp_task],
             addr,
         })
@@ -289,6 +344,18 @@ impl Proxy {
         if let Ok(mut c) = self.config.write() {
             f(&mut c);
         }
+    }
+
+    /// Change the split domains. Returns the addresses learned only for
+    /// domains that are no longer listed; the caller removes them from the
+    /// nft sets so those sites stop being split right away.
+    pub fn set_domains(&self, domains: DomainList) -> Vec<IpAddr> {
+        let gone = match self.learned.lock() {
+            Ok(mut l) => l.prune(&domains, Instant::now()),
+            Err(_) => Vec::new(),
+        };
+        self.update(|c| c.domains = domains);
+        gone
     }
 
     pub fn stop(self) {
@@ -352,8 +419,10 @@ mod tests {
         client.recv(&mut buf).await.unwrap();
         assert!(rx.try_recv().is_err(), "unlisted domains aren't recorded");
 
-        // Rules change live.
-        proxy.update(|c| c.domains = DomainList::new(&[Rule::parse("example.com").unwrap()]));
+        // Rules change live, and the removed domain's address is handed back
+        // so it can leave the nft sets.
+        let gone = proxy.set_domains(DomainList::new(&[Rule::parse("example.com").unwrap()]));
+        assert_eq!(gone, vec!["93.184.216.34".parse::<IpAddr>().unwrap()]);
         client.send(&query(3, "a.example.com")).await.unwrap();
         client.recv(&mut buf).await.unwrap();
         assert!(rx.recv().await.is_some());
@@ -383,6 +452,35 @@ mod tests {
         assert_eq!(&buf[..2], &5u16.to_be_bytes());
         assert!(n > 12);
         proxy.stop();
+    }
+
+    #[test]
+    fn prune_forgets_only_unlisted_names() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let list = |r: &[&str]| {
+            DomainList::new(
+                &r.iter()
+                    .map(|r| Rule::parse(r).unwrap())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let now = Instant::now();
+        let mut l = Learned::default();
+        l.add("sabtira.ir.", &[(ip("46.36.99.104"), 300)], now);
+        // A CDN address shared by a listed and an unlisted name.
+        l.add("www.snapp.ir", &[(ip("2.144.1.1"), 300)], now);
+        l.add("digikala.com", &[(ip("2.144.1.1"), 300)], now);
+        // Already timed out in the kernel: nothing to delete.
+        l.add("old.ir", &[(ip("5.5.5.5"), 60)], now);
+
+        let later = now + Duration::from_secs(120);
+        let mut gone = l.prune(&list(&["digikala.com"]), later);
+        gone.sort();
+        assert_eq!(gone, vec![ip("46.36.99.104")]);
+        // digikala.com still holds the shared address.
+        assert!(l.prune(&list(&["digikala.com"]), later).is_empty());
+        assert_eq!(l.prune(&list(&[]), later), vec![ip("2.144.1.1")]);
+        assert!(l.0.is_empty());
     }
 
     #[test]

@@ -150,8 +150,14 @@ impl Split {
             let (v4, v6) = static_sets(s, countries);
             net::run_nft(&net::static_sets_script(&v4, &v6))?;
             if let Some(p) = &self.proxy {
-                let domains = DomainList::new(&rules(s));
-                p.update(|c| c.domains = domains);
+                let gone = p.set_domains(DomainList::new(&rules(s)));
+                if !gone.is_empty() {
+                    info!(
+                        "split: dropping {} address(es) of removed domains",
+                        gone.len()
+                    );
+                    net::forget_dynamic(&gone);
+                }
             }
             self.tracker()?.set_apps(&s.apps);
         }

@@ -129,8 +129,8 @@ pub fn table_script(spec: &TableSpec) -> String {
     s
 }
 
-/// Replace just the static sets (rules changed while connected), keeping
-/// the dynamic DNS entries.
+/// Replace just the static sets (rules changed while connected). Dynamic
+/// DNS entries stay; those of removed domains go through `forget_dynamic`.
 pub fn static_sets_script(v4: &[String], v6: &[String]) -> String {
     let mut s = format!("flush set inet {TABLE} static4\nflush set inet {TABLE} static6\n");
     if !v4.is_empty() {
@@ -168,6 +168,36 @@ pub fn dynamic_script(entries: &[(IpAddr, u32)]) -> String {
         }
     }
     s
+}
+
+/// Remove addresses learned for domains that are no longer split.
+pub fn forget_script(ips: &[IpAddr]) -> String {
+    let mut s = String::new();
+    for (set, v6) in [("dyn4", false), ("dyn6", true)] {
+        let els: Vec<String> = ips
+            .iter()
+            .filter(|ip| ip.is_ipv6() == v6)
+            .map(IpAddr::to_string)
+            .collect();
+        if !els.is_empty() {
+            s.push_str(&format!(
+                "delete element inet {TABLE} {set} {{ {} }}\n",
+                els.join(", ")
+            ));
+        }
+    }
+    s
+}
+
+/// `forget_script`, tolerating addresses whose timeout already ran out in
+/// the kernel (deleting a missing element fails the whole batch).
+pub fn forget_dynamic(ips: &[IpAddr]) {
+    if ips.is_empty() || run_nft(&forget_script(ips)).is_ok() {
+        return;
+    }
+    for ip in ips {
+        let _ = run_nft(&forget_script(std::slice::from_ref(ip)));
+    }
 }
 
 pub fn delete_table_script() -> String {
@@ -372,6 +402,18 @@ mod tests {
         assert!(d.contains("add element inet portalsplit dyn6 { ::1 timeout 60s }"));
     }
 
+    #[test]
+    fn forget_script_by_family() {
+        let f = forget_script(&[
+            "1.2.3.4".parse().unwrap(),
+            "5.6.7.8".parse().unwrap(),
+            "::1".parse().unwrap(),
+        ]);
+        assert!(f.contains("delete element inet portalsplit dyn4 { 1.2.3.4, 5.6.7.8 }"));
+        assert!(f.contains("delete element inet portalsplit dyn6 { ::1 }"));
+        assert!(forget_script(&[]).is_empty());
+    }
+
     fn sh(cmd: &str) -> String {
         let out = Command::new("sh").args(["-c", cmd]).output().unwrap();
         assert!(
@@ -456,6 +498,13 @@ mod tests {
             leaves_via("9.9.9.9"),
             "eth0",
             "addresses from split DNS go around it"
+        );
+        // 7.7.7.7 was never added: the batch fails and each is retried alone.
+        forget_dynamic(&["9.9.9.9".parse().unwrap(), "7.7.7.7".parse().unwrap()]);
+        assert_eq!(
+            leaves_via("9.9.9.9"),
+            "portal0",
+            "addresses of removed domains go back into the tunnel"
         );
         run_nft(&static_sets_script(&[], &[])).unwrap();
         assert_eq!(leaves_via("5.1.2.3"), "portal0", "rule changes apply live");
