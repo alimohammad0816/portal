@@ -1,0 +1,57 @@
+export type AuthKind = "certificate" | "user_pass" | "user_pass_challenge";
+
+export interface Profile {
+  id: string;
+  name: string;
+  group: string;
+  country: string | null;
+  remote_host: string;
+  remote_port: number;
+  proto: string;
+  auth: AuthKind;
+  challenge: string | null;
+  source_file: string;
+  imported_at: number;
+  last_connected_at: number | null;
+}
+
+export type ConnState = "disconnected" | "connecting" | "needs_credentials" | "connected" | "disconnecting";
+
+export interface Status {
+  state: ConnState;
+  profile_id: string | null;
+  detail: string | null;
+  connected_since: number | null;
+  tunnel_ip: string | null;
+  server_ip: string | null;
+  bytes_in: number;
+  bytes_out: number;
+  rate_in: number;
+  rate_out: number;
+  error: string | null;
+}
+
+export interface ImportResult {
+  imported: Profile[];
+  errors: { file: string; message: string }[];
+}
+
+export interface DaemonInfo {
+  bus: "system" | "session";
+  reachable: boolean;
+  error: string | null;
+}
+
+export const emptyStatus: Status = {
+  state: "disconnected",
+  profile_id: null,
+  detail: null,
+  connected_since: null,
+  tunnel_ip: null,
+  server_ip: null,
+  bytes_in: 0,
+  bytes_out: 0,
+  rate_in: 0,
+  rate_out: 0,
+  error: null,
+};

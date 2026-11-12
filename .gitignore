@@ -1,0 +1,9 @@
+/target
+node_modules/
+dist/
+apps/desktop/src-tauri/gen/
+*.log
+.DS_Store
+.vscode/
+.idea/
+.claude/

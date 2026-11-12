@@ -1,0 +1,103 @@
+# Tunnel
+
+An OpenVPN client for Linux with the conveniences of commercial VPN apps:
+import your own `.ovpn` profiles, switch locations in one click, and (next
+phase) split tunneling and a kill switch that apply without reconnecting.
+
+## Layout
+
+```
+crates/tunnel-core    shared types, D-Bus contract, .ovpn parser and sanitizer
+crates/tunneld        privileged daemon: runs OpenVPN, exposes org.tunnelvpn.Daemon1
+crates/tunnel-cli     `tunnel` command-line client
+apps/desktop          Tauri 2 + React + shadcn/ui desktop app (src-tauri is the Rust side)
+packaging             systemd unit, D-Bus policy, polkit actions
+scripts               dev install script
+```
+
+```
+desktop app / tunnel CLI  ──D-Bus (polkit)──►  tunneld (root, systemd)
+                                                 └─ openvpn  ◄─ management socket
+```
+
+The GUI never runs as root. `tunneld` drives `openvpn` over its management
+socket (state, traffic counters, credential prompts, logs) and broadcasts
+`StatusChanged` / `LogLine` signals.
+
+### Profile security
+
+`tunneld` runs OpenVPN as root, so an imported profile could otherwise run
+code as root. Imports are sanitized: script hooks (`up`, `down`,
+`script-security`, `plugin`, ...), management and logging directives, and
+anything that reads or writes an arbitrary path are rejected. Keys and
+certificates must be inline; the app and CLI read referenced files as the
+user and embed them before sending the profile to the daemon.
+
+## Development
+
+System packages (Ubuntu 26.04):
+
+```bash
+sudo apt install rustup build-essential pkg-config libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev
+```
+
+```bash
+rustup default stable
+```
+
+Run the tests:
+
+```bash
+cargo test --workspace
+```
+
+### UI only, no root
+
+Run a simulated daemon on your session bus and point the app at it:
+
+```bash
+cargo run -p tunneld -- --session --mock
+```
+
+```bash
+cd apps/desktop && pnpm install && TUNNEL_SESSION_BUS=1 pnpm tauri dev
+```
+
+Opening `pnpm dev` in a plain browser also works: the UI falls back to
+built-in sample data.
+
+### Real connections
+
+Install the daemon with its systemd unit, D-Bus policy and polkit actions
+(asks for sudo), then start the app normally:
+
+```bash
+scripts/install-dev.sh
+```
+
+```bash
+cd apps/desktop && pnpm tauri dev
+```
+
+CLI:
+
+```bash
+tunnel import ~/Downloads/de-fra.ovpn
+```
+
+```bash
+tunnel connect de-fra
+```
+
+## Roadmap
+
+1. **Now:** import, connect/disconnect, location list with latency, live
+   status, tray, logs.
+2. Kill switch, DNS leak protection (systemd-resolved), IPv6 leak blocking,
+   allow-LAN.
+3. Split tunneling: profiles run with `route-nopull`; routes live in a
+   dedicated table selected by `fwmark`, nftables sets hold excluded IPs,
+   hostnames (via a DNS forwarder) and apps (cgroup v2), so rule changes
+   apply live.
+4. Credentials in GNOME Keyring, trusted networks, proxy gateway, GNOME
+   Shell quick-settings tile, server geolocation.

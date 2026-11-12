@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Installed to /usr/share/polkit-1/actions/. The person at the
+     desktop can connect and manage profiles without a password, like
+     NetworkManager; remote and inactive sessions must authenticate. -->
+<policyconfig>
+  <vendor>Tunnel</vendor>
+
+  <action id="org.tunnelvpn.connect">
+    <description>Connect and disconnect the VPN</description>
+    <message>Authentication is required to change the VPN connection</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.tunnelvpn.manage-profiles">
+    <description>Import, edit and remove VPN profiles</description>
+    <message>Authentication is required to change VPN profiles</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
