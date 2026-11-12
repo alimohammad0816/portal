@@ -86,11 +86,32 @@ pub fn lan_address(tunnel: &str) -> Option<IpAddr> {
         .find(|ip| is_local(*ip) && !ip.is_loopback())
 }
 
+/// Connect to `host`, trying each of its addresses in turn: the first one
+/// may be unreachable (IPv6 blocked outside an IPv4-only tunnel, `localhost`
+/// resolving to `::1` first).
 async fn dial(host: &str, port: u16, mark: u32) -> Result<TcpStream> {
-    let target = tokio::net::lookup_host((host, port))
-        .await?
-        .next()
-        .context("no address for host")?;
+    let targets: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+    if targets.is_empty() {
+        bail!("no address for {host}");
+    }
+    tokio::time::timeout(CONNECT_TIMEOUT, dial_any(&targets, mark))
+        .await
+        .context("timed out connecting")?
+}
+
+/// The first of `targets` that accepts a connection.
+async fn dial_any(targets: &[SocketAddr], mark: u32) -> Result<TcpStream> {
+    let mut last = anyhow::anyhow!("no address to connect to");
+    for target in targets {
+        match dial_one(*target, mark).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+async fn dial_one(target: SocketAddr, mark: u32) -> Result<TcpStream> {
     let sock = if target.is_ipv4() {
         TcpSocket::new_v4()?
     } else {
@@ -99,7 +120,7 @@ async fn dial(host: &str, port: u16, mark: u32) -> Result<TcpStream> {
     if mark != 0 {
         socket2::SockRef::from(&sock).set_mark(mark)?;
     }
-    Ok(tokio::time::timeout(CONNECT_TIMEOUT, sock.connect(target)).await??)
+    Ok(sock.connect(target).await?)
 }
 
 async fn serve(conn: TcpStream, mark: u32) -> Result<()> {
@@ -309,6 +330,22 @@ mod tests {
             }
         });
         addr
+    }
+
+    #[tokio::test]
+    async fn dial_falls_back_to_the_next_address() {
+        let echo = echo_server().await;
+        // `::1` first (nothing listens there), then `127.0.0.1`.
+        let targets = [
+            SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 1], echo.port())),
+            echo,
+        ];
+        let mut s = dial_any(&targets, 0).await.unwrap();
+        s.write_all(b"x").await.unwrap();
+        let mut b = [0u8; 1];
+        s.read_exact(&mut b).await.unwrap();
+        assert_eq!(&b, b"x");
+        assert!(dial_any(&targets[..1], 0).await.is_err());
     }
 
     #[tokio::test]
