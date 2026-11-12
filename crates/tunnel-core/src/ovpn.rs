@@ -144,6 +144,8 @@ pub struct ParsedConfig {
     pub remotes: Vec<Remote>,
     pub auth: AuthKind,
     pub challenge: Option<String>,
+    /// `tun` or `tap`, from the `dev` / `dev-type` directives.
+    pub dev_type: String,
     /// Config text safe to hand to OpenVPN.
     pub sanitized: String,
 }
@@ -303,6 +305,7 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
     let mut auth_user_pass = false;
     let mut inline_creds = false;
     let mut challenge = None;
+    let mut dev_type = "tun".to_string();
     let mut out = String::with_capacity(text.len());
 
     let mut check =
@@ -354,6 +357,16 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
                 }
                 "static-challenge" => {
                     challenge = words.get(1).cloned();
+                }
+                "dev" | "dev-type" => {
+                    if let Some(d) = words.get(1) {
+                        let d = d.to_ascii_lowercase();
+                        if d.starts_with("tap") {
+                            dev_type = "tap".into();
+                        } else if d.starts_with("tun") {
+                            dev_type = "tun".into();
+                        }
+                    }
                 }
                 "http-proxy" if words.len() > 3 => {
                     return Err(ConfigError::ExternalFile {
@@ -435,6 +448,7 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
         remotes,
         auth,
         challenge,
+        dev_type,
         sanitized: out,
     })
 }
@@ -621,6 +635,24 @@ mod tests {
         .unwrap();
         assert_eq!(p.auth, AuthKind::UserPassChallenge);
         assert_eq!(p.challenge.as_deref(), Some("Enter OTP"));
+    }
+
+    #[test]
+    fn detects_device_type() {
+        assert_eq!(
+            sanitize("client\nremote a\ndev tun0\n").unwrap().dev_type,
+            "tun"
+        );
+        assert_eq!(
+            sanitize("client\nremote a\ndev tap\n").unwrap().dev_type,
+            "tap"
+        );
+        assert_eq!(
+            sanitize("client\nremote a\ndev vpn\ndev-type tap\n")
+                .unwrap()
+                .dev_type,
+            "tap"
+        );
     }
 
     #[test]

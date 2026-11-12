@@ -23,7 +23,7 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut f = fs::OpenOptions::new()

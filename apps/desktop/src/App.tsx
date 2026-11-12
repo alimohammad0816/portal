@@ -10,6 +10,7 @@ import {
   RotateCw,
   Search,
   Shield,
+  ShieldAlert,
   SlidersHorizontal,
   X,
 } from "lucide-react";
@@ -20,19 +21,23 @@ import { type Latency, LocationList } from "@/components/LocationList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sparkline } from "@/components/Sparkline";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { UpdateDialog } from "@/components/UpdateDialog";
 import { WorldMap } from "@/components/WorldMap";
 import {
   api,
   type DaemonInfo,
+  defaultSettings,
   emptyStatus,
   errorText,
   inTauri,
   onDaemon,
   onLog,
+  onSettings,
   onStatus,
   type Profile,
+  type Settings,
   type Status,
   type UpdateInfo,
   type Versions,
@@ -93,6 +98,8 @@ export function App() {
   const [credsFor, setCredsFor] = useState<Profile | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("firewall");
+  const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [dragging, setDragging] = useState(false);
   const [rates, setRates] = useState<{ rx: number[]; tx: number[] }>({ rx: [], tx: [] });
   const [now, setNow] = useState(() => Date.now());
@@ -149,10 +156,11 @@ export function App() {
     const info = await api.daemonInfo();
     setDaemon(info);
     if (!info.reachable) return;
-    const [p, s, l] = await Promise.all([api.listProfiles(), api.getStatus(), api.getLog()]);
+    const [p, s, l, st] = await Promise.all([api.listProfiles(), api.getStatus(), api.getLog(), api.getSettings()]);
     setProfiles(p);
     setStatus(s);
     setLog(l);
+    setSettings(st);
   }, []);
 
   // Initial load and live updates from the daemon.
@@ -168,6 +176,7 @@ export function App() {
         }
       }),
       onLog((line) => setLog((l) => [...l.slice(-999), line])),
+      onSettings(setSettings),
       onDaemon((info) => {
         setDaemon(info);
         if (info.reachable) {
@@ -279,6 +288,22 @@ export function App() {
     else setCredsFor(p);
   }
 
+  async function changeSettings(next: Settings) {
+    const prev = settings;
+    setSettings(next);
+    try {
+      setSettings(await api.setSettings(next));
+    } catch (e) {
+      setSettings(prev);
+      setNotice(errorText(e));
+    }
+  }
+
+  function openSettings(tab: string) {
+    setSettingsTab(tab);
+    setSettingsOpen(true);
+  }
+
   async function disconnect() {
     try {
       await api.disconnect();
@@ -374,7 +399,7 @@ export function App() {
           <Button variant="ghost" size="icon" aria-label="Import profiles" onClick={pickFiles} className="text-muted-foreground">
             <Download />
           </Button>
-          <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => setSettingsOpen(true)} className="text-muted-foreground">
+          <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => openSettings("firewall")} className="text-muted-foreground">
             <SlidersHorizontal />
           </Button>
           <button
@@ -440,6 +465,26 @@ export function App() {
         )}
       </div>
 
+      {status.internet_blocked && status.state === "disconnected" && (
+        <div className="mx-4 mt-2 flex items-center gap-3 rounded-lg border px-3 py-2.5">
+          <ShieldAlert className="size-4 shrink-0 text-warning" />
+          <span className="flex-1 text-xs leading-5 text-muted-foreground">
+            {settings.firewall === "always"
+              ? "The firewall is always on: only the VPN can reach the internet."
+              : "The VPN dropped, so the firewall is blocking the internet."}
+          </span>
+          {settings.firewall === "always" ? (
+            <Button size="sm" variant="outline" onClick={() => openSettings("firewall")}>
+              Change
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" onClick={disconnect}>
+              Unblock
+            </Button>
+          )}
+        </div>
+      )}
+
       {/* Stats */}
       <div className="mx-4 mt-3 grid grid-cols-3 rounded-xl border">
         <div className="flex flex-col gap-[3px] border-r px-3 py-2.5">
@@ -457,6 +502,33 @@ export function App() {
           <span className="truncate font-mono text-sm font-medium">{live ? (status.tunnel_ip ?? "—") : "—"}</span>
           <span className="truncate text-[11px] text-dim">{selected ? `${selected.proto.toUpperCase()} · ${authLabel(selected)}` : ""}</span>
         </div>
+      </div>
+
+      {/* Quick toggles */}
+      <div className="mx-4 mt-2 grid grid-cols-3 rounded-xl border">
+        <QuickToggle
+          label="Firewall"
+          sub={settings.firewall === "always" ? "Always on" : settings.firewall === "auto" ? (status.firewall_active ? "Blocking leaks" : "Automatic") : "Off"}
+          checked={settings.firewall !== "off"}
+          onChange={(on) => changeSettings({ ...settings, firewall: on ? "auto" : "off" })}
+          onMore={() => openSettings("firewall")}
+        />
+        <QuickToggle
+          label="LAN"
+          sub={settings.allow_lan ? "Allowed" : "Blocked"}
+          checked={settings.allow_lan}
+          onChange={(on) => changeSettings({ ...settings, allow_lan: on })}
+          onMore={() => openSettings("firewall")}
+          divider
+        />
+        <QuickToggle
+          label="DNS guard"
+          sub={settings.dns_leak_protection ? (live && status.dns_servers[0] ? status.dns_servers[0] : "On") : "Off"}
+          checked={settings.dns_leak_protection}
+          onChange={(on) => changeSettings({ ...settings, dns_leak_protection: on })}
+          onMore={() => openSettings("dns")}
+          divider
+        />
       </div>
 
       {/* Locations */}
@@ -525,6 +597,11 @@ export function App() {
         profiles={profiles}
         log={log}
         onProfilesChanged={refreshProfiles}
+        settings={settings}
+        status={status}
+        onSettingsChange={changeSettings}
+        tab={settingsTab}
+        onTabChange={setSettingsTab}
         updates={{
           autoCheck,
           onAutoCheckChange: (on) => {
@@ -537,6 +614,7 @@ export function App() {
           error: updateError,
           onCheckNow: checkUpdates,
           onShowUpdate: () => {
+            setSettingsTab("about");
             setSettingsOpen(false);
             setUpdateOpen(true);
           },
@@ -549,6 +627,32 @@ export function App() {
         onOpenChange={setUpdateOpen}
         onInstalling={(v) => setInstalling(v)}
       />
+    </div>
+  );
+}
+
+function QuickToggle({
+  label,
+  sub,
+  checked,
+  onChange,
+  onMore,
+  divider,
+}: {
+  label: string;
+  sub: string;
+  checked: boolean;
+  onChange: (on: boolean) => void;
+  onMore: () => void;
+  divider?: boolean;
+}) {
+  return (
+    <div className={cn("flex min-w-0 items-center justify-between gap-2 px-3 py-2.5", divider && "border-l")}>
+      <button type="button" onClick={onMore} className="min-w-0 cursor-pointer text-left">
+        <div className="text-[13px] font-medium">{label}</div>
+        <div className="truncate text-[11px] text-muted-foreground">{sub}</div>
+      </button>
+      <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
     </div>
   );
 }

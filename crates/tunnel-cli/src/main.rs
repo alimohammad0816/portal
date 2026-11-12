@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use tunnel_core::ovpn;
-use tunnel_core::{AuthKind, ConnState, DaemonProxy, Profile, Status};
+use tunnel_core::{
+    AuthKind, ConnState, DaemonProxy, DnsMode, FirewallMode, Profile, Settings, Status,
+};
 
 #[derive(Parser)]
 #[command(name = "tunnel", version, about = "Control the Tunnel VPN daemon")]
@@ -52,6 +54,10 @@ enum Cmd {
     },
     /// Remove a profile.
     Remove { profile: String },
+    /// Show or change settings, e.g.
+    /// `tunnel settings firewall=always lan=off ipv6=on dns=1.1.1.1,9.9.9.9 dns-guard=on`.
+    /// `firewall` is off, auto or always; `dns` is `vpn` or a list of servers.
+    Settings { changes: Vec<String> },
     /// Print the OpenVPN log.
     Log {
         /// Keep printing new lines.
@@ -175,6 +181,16 @@ async fn run(cli: Cli) -> Result<()> {
             let p = find(&d, &profile).await?;
             d.remove_profile(&p.id).await?;
             println!("removed {}", p.name);
+        }
+        Cmd::Settings { changes } => {
+            let mut st: Settings = serde_json::from_str(&d.get_settings().await?)?;
+            if !changes.is_empty() {
+                for c in &changes {
+                    apply_change(&mut st, c)?;
+                }
+                st = serde_json::from_str(&d.set_settings(&serde_json::to_string(&st)?).await?)?;
+            }
+            print_settings(&st);
         }
         Cmd::Log { follow } => {
             let mut stream = if follow {
@@ -314,7 +330,70 @@ async fn print_status(d: &DaemonProxy<'_>, s: &Status) -> Result<()> {
             if let Some(e) = &s.error {
                 println!("error: {e}");
             }
+            if s.internet_blocked {
+                println!("firewall: internet is blocked outside the VPN");
+            }
         }
     }
     Ok(())
+}
+
+fn on_off(v: &str) -> Result<bool> {
+    match v {
+        "on" | "yes" | "true" | "1" => Ok(true),
+        "off" | "no" | "false" | "0" => Ok(false),
+        _ => bail!("expected on or off, got `{v}`"),
+    }
+}
+
+fn apply_change(st: &mut Settings, change: &str) -> Result<()> {
+    let (key, value) = change
+        .split_once('=')
+        .with_context(|| format!("`{change}` should look like key=value"))?;
+    match key {
+        "firewall" => {
+            st.firewall = match value {
+                "off" => FirewallMode::Off,
+                "auto" => FirewallMode::Auto,
+                "always" => FirewallMode::Always,
+                _ => bail!("firewall is off, auto or always"),
+            }
+        }
+        "lan" => st.allow_lan = on_off(value)?,
+        "ipv6" => st.block_ipv6 = on_off(value)?,
+        "dns-guard" => st.dns_leak_protection = on_off(value)?,
+        "dns" => {
+            st.dns = if value == "vpn" {
+                DnsMode::Vpn
+            } else {
+                DnsMode::Custom(value.split(',').map(|s| s.trim().to_string()).collect())
+            }
+        }
+        _ => bail!("unknown setting `{key}` (firewall, lan, ipv6, dns, dns-guard)"),
+    }
+    Ok(())
+}
+
+fn print_settings(st: &Settings) {
+    let yn = |b: bool| if b { "on" } else { "off" };
+    let fw = match st.firewall {
+        FirewallMode::Off => "off",
+        FirewallMode::Auto => "auto",
+        FirewallMode::Always => "always",
+    };
+    let dns = match &st.dns {
+        DnsMode::Vpn => "vpn".to_string(),
+        DnsMode::Custom(list) => list.join(","),
+    };
+    println!("firewall   {fw}");
+    println!(
+        "lan        {}  (allowed through the firewall)",
+        yn(st.allow_lan)
+    );
+    println!(
+        "ipv6       {}  (blocked outside the tunnel)",
+        yn(st.block_ipv6)
+    );
+    println!("dns        {dns}");
+    println!("dns-guard  {}", yn(st.dns_leak_protection));
 }

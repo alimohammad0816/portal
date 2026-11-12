@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use tunnel_core::names::{ACTION_CONNECT, ACTION_MANAGE_PROFILES, ACTION_UPDATE};
+use tunnel_core::Settings;
+use tunnel_core::names::{ACTION_CONNECT, ACTION_MANAGE_PROFILES, ACTION_SETTINGS, ACTION_UPDATE};
 use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::Value;
@@ -179,6 +180,23 @@ impl DaemonIface {
         self.mgr.lock().await.log()
     }
 
+    async fn get_settings(&self) -> fdo::Result<String> {
+        to_json(self.mgr.lock().await.settings())
+    }
+
+    async fn set_settings(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+        settings: String,
+    ) -> fdo::Result<String> {
+        self.authorize(conn, &hdr, ACTION_SETTINGS).await?;
+        let new: Settings =
+            serde_json::from_str(&settings).map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        let stored = self.mgr.lock().await.set_settings(new).map_err(failed)?;
+        to_json(&stored)
+    }
+
     async fn version(&self) -> String {
         crate::update::current_version().to_string()
     }
@@ -201,6 +219,9 @@ impl DaemonIface {
 
     #[zbus(signal)]
     pub async fn status_changed(emitter: &SignalEmitter<'_>, status: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    pub async fn settings_changed(emitter: &SignalEmitter<'_>, settings: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     pub async fn log_line(emitter: &SignalEmitter<'_>, line: &str) -> zbus::Result<()>;

@@ -7,7 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api, errorText, type Profile, type UpdateInfo } from "@/lib/api";
+import { DnsSettings, FirewallSettings } from "@/components/SecuritySettings";
+import { api, errorText, type Profile, type Settings, type Status, type UpdateInfo } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
 
 function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () => void }) {
@@ -192,6 +193,11 @@ export function SettingsDialog({
   log,
   onProfilesChanged,
   updates,
+  settings,
+  status,
+  onSettingsChange,
+  tab,
+  onTabChange,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -199,20 +205,33 @@ export function SettingsDialog({
   log: string[];
   onProfilesChanged: () => void;
   updates: UpdateSettings;
+  settings: Settings;
+  status: Status;
+  onSettingsChange: (s: Settings) => void;
+  tab: string;
+  onTabChange: (tab: string) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[calc(100%-2rem)] gap-3">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
-          <DialogDescription>Firewall, split tunneling and DNS arrive in the next phase.</DialogDescription>
+          <DialogDescription>Changes apply right away, without reconnecting.</DialogDescription>
         </DialogHeader>
-        <Tabs defaultValue="profiles">
-          <TabsList>
+        <Tabs value={tab} onValueChange={onTabChange}>
+          <TabsList className="w-full">
+            <TabsTrigger value="firewall">Firewall</TabsTrigger>
+            <TabsTrigger value="dns">DNS</TabsTrigger>
             <TabsTrigger value="profiles">Profiles</TabsTrigger>
             <TabsTrigger value="log">Log</TabsTrigger>
             <TabsTrigger value="about">About</TabsTrigger>
           </TabsList>
+          <TabsContent value="firewall">
+            <FirewallSettings settings={settings} onChange={onSettingsChange} />
+          </TabsContent>
+          <TabsContent value="dns">
+            <DnsSettings settings={settings} status={status} onChange={onSettingsChange} />
+          </TabsContent>
           <TabsContent value="profiles">
             <div className="scroll-subtle max-h-[26rem] overflow-y-auto pr-1">
               {profiles.length === 0 ? (

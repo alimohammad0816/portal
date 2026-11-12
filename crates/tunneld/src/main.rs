@@ -3,6 +3,8 @@
 
 mod backend;
 mod dbus;
+mod dns;
+mod firewall;
 mod manager;
 mod profiles;
 mod update;
@@ -19,7 +21,7 @@ use zbus::object_server::SignalEmitter;
 
 use crate::backend::{Backend, Mock, OpenVpn};
 use crate::dbus::DaemonIface;
-use crate::manager::{Manager, Notice};
+use crate::manager::{Manager, Notice, Platform};
 use crate::profiles::ProfileStore;
 
 #[derive(Parser, Debug)]
@@ -87,14 +89,15 @@ async fn main() -> Result<()> {
         warn!("mock backend: connections are simulated");
         Arc::new(Mock)
     } else {
-        Arc::new(OpenVpn {
-            binary: args.openvpn,
-            runtime_dir,
-        })
+        Arc::new(OpenVpn::new(args.openvpn, runtime_dir))
     };
 
     let (notice_tx, mut notice_rx) = mpsc::unbounded_channel();
-    let mgr = Manager::spawn(store, backend, notice_tx);
+    let platform = Platform {
+        system: !args.session,
+        settings_path: state_dir.join("settings.json"),
+    };
+    let mgr = Manager::spawn(store, backend, notice_tx, platform);
     let iface = DaemonIface {
         mgr: mgr.clone(),
         use_polkit: !args.session,
@@ -129,6 +132,10 @@ async fn main() -> Result<()> {
                     DaemonIface::status_changed(&emitter, &json).await
                 }
                 Notice::Log(line) => DaemonIface::log_line(&emitter, &line).await,
+                Notice::Settings(st) => {
+                    let json = serde_json::to_string(&st).unwrap_or_default();
+                    DaemonIface::settings_changed(&emitter, &json).await
+                }
             };
             if let Err(e) = r {
                 warn!("emitting signal: {e}");
@@ -146,5 +153,6 @@ async fn main() -> Result<()> {
     if let Some(h) = handle {
         h.stop().await;
     }
+    mgr.lock().await.shutdown();
     Ok(())
 }

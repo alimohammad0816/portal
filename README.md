@@ -124,12 +124,38 @@ One-time setup: add the contents of the minisign secret key
 `MINISIGN_SECRET_KEY`. Keep that file safe: losing it means installed apps
 can't verify new releases, and anyone who has it can ship updates.
 
+## Firewall and DNS
+
+The kill switch is one nftables table, `inet tunnelvpn`, owned by `tunneld`
+and replaced atomically on every change. While it's active, outgoing
+traffic may only use the tunnel interface (`tunnel0`), loopback, DHCP and
+neighbor discovery, the LAN (if allowed), and the daemon's own cgroup (so
+OpenVPN can reach the server). While connecting, systemd-resolved may also
+resolve the server's name.
+
+- **Automatic** (default): on while connecting and connected; if the tunnel
+  drops, traffic stays blocked until you reconnect or press Unblock.
+- **Always on**: blocks everything outside the VPN even when disconnected.
+  The table stays in place across service restarts and is removed when the
+  package is removed.
+- **Off**.
+
+DNS goes through systemd-resolved: once connected, the tunnel link gets the
+pushed (or your custom) servers and the `~.` routing domain. With DNS leak
+protection on, port 53 and 853 are rejected everywhere except the tunnel.
+IPv6 outside the tunnel can be blocked separately for IPv4-only VPNs.
+
+From the CLI:
+
+```bash
+tunnel settings firewall=always lan=off dns=1.1.1.1,9.9.9.9
+```
+
 ## Roadmap
 
-1. **Now:** import, connect/disconnect, location list with latency, live
-   status, tray, logs.
-2. Kill switch, DNS leak protection (systemd-resolved), IPv6 leak blocking,
-   allow-LAN.
+1. Done: import, connect/disconnect, location list with latency, live
+   status, tray, logs, signed updates.
+2. Done: kill switch, DNS leak protection, IPv6 leak blocking, allow-LAN.
 3. Split tunneling: profiles run with `route-nopull`; routes live in a
    dedicated table selected by `fwmark`, nftables sets hold excluded IPs,
    hostnames (via a DNS forwarder) and apps (cgroup v2), so rule changes

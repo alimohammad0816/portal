@@ -2,7 +2,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 
 import { mockInvoke, mockListen } from "./browser-mock";
-import type { DaemonInfo, ImportResult, Profile, Status, UpdateInfo, Versions } from "./types";
+import type { DaemonInfo, ImportResult, Profile, Settings, Status, UpdateInfo, Versions } from "./types";
 
 export * from "./types";
 
@@ -35,6 +35,8 @@ export const api = {
   getLog: () => invoke<string[]>("get_log"),
   probeLatency: (host: string, port: number, proto: string) =>
     invoke<number | null>("probe_latency", { host, port, proto }),
+  getSettings: () => invoke<Settings>("get_settings"),
+  setSettings: (settings: Settings) => invoke<Settings>("set_settings", { settings }),
   versions: () => invoke<Versions>("versions"),
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
   installUpdate: () => invoke<string>("install_update"),
@@ -47,6 +49,10 @@ export function onStatus(cb: (s: Status) => void): Promise<UnlistenFn> {
 
 export function onLog(cb: (line: string) => void): Promise<UnlistenFn> {
   return listen<string>("tunnel://log", (e) => cb(e.payload));
+}
+
+export function onSettings(cb: (s: Settings) => void): Promise<UnlistenFn> {
+  return listen<Settings>("tunnel://settings", (e) => cb(e.payload));
 }
 
 export function onDaemon(cb: (info: DaemonInfo) => void): Promise<UnlistenFn> {

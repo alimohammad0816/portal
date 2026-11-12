@@ -14,7 +14,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
 use tokio::sync::Mutex;
 use tunnel_core::ovpn;
-use tunnel_core::{ConnState, DaemonProxy, Profile, Status};
+use tunnel_core::{ConnState, DaemonProxy, Profile, Settings, Status};
 
 /// Which bus the daemon lives on. `TUNNEL_SESSION_BUS=1` selects the
 /// session bus, for running against `tunneld --session --mock`.
@@ -201,6 +201,17 @@ async fn get_status(daemon: State<'_, Daemon>) -> Result<Status, String> {
 }
 
 #[tauri::command]
+async fn get_settings(daemon: State<'_, Daemon>) -> Result<Settings, String> {
+    parse(daemon.get().await?.get_settings().await.map_err(err)?)
+}
+
+#[tauri::command]
+async fn set_settings(daemon: State<'_, Daemon>, settings: Settings) -> Result<Settings, String> {
+    let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
+    parse(daemon.get().await?.set_settings(&json).await.map_err(err)?)
+}
+
+#[tauri::command]
 async fn get_log(daemon: State<'_, Daemon>) -> Result<Vec<String>, String> {
     daemon.get().await?.get_log().await.map_err(err)
 }
@@ -321,7 +332,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
                         .ok()
                         .and_then(|s| serde_json::from_str(&s).ok());
                     match status {
-                        Some(s) if s.state != ConnState::Disconnected => {
+                        Some(s) if s.state != ConnState::Disconnected || s.internet_blocked => {
                             let _ = d.disconnect().await;
                         }
                         // Connecting may need credentials; the window handles that.
@@ -359,6 +370,9 @@ fn update_tray(app: &AppHandle, s: &Status, profile_name: Option<&str>) {
             (format!("Connecting · {name}"), "Cancel")
         }
         ConnState::Disconnecting => ("Disconnecting…".to_string(), "Disconnect"),
+        ConnState::Disconnected if s.internet_blocked => {
+            ("Internet blocked by the firewall".to_string(), "Unblock")
+        }
         ConnState::Disconnected => ("Not connected".to_string(), "Connect…"),
     };
     let _ = tray.status.set_text(&text);
@@ -380,6 +394,7 @@ async fn pump_events(app: AppHandle) {
             let d = daemon.get().await?;
             let mut status = d.receive_status_changed().await.map_err(err)?;
             let mut log = d.receive_log_line().await.map_err(err)?;
+            let mut settings = d.receive_settings_changed().await.map_err(err)?;
             let mut owner = d.inner().receive_owner_changed().await.map_err(err)?;
 
             let initial: Status = parse(d.get_status().await.map_err(err)?)?;
@@ -400,6 +415,13 @@ async fn pump_events(app: AppHandle) {
                         }
                         update_tray(&app, &s, s.profile_id.as_ref().and_then(|id| names.get(id)).map(String::as_str));
                         let _ = app.emit("tunnel://status", s);
+                    }
+                    Some(sig) = settings.next() => {
+                        if let Ok(args) = sig.args()
+                            && let Ok(st) = serde_json::from_str::<Settings>(args.settings())
+                        {
+                            let _ = app.emit("tunnel://settings", st);
+                        }
                     }
                     Some(sig) = log.next() => {
                         if let Ok(args) = sig.args() {
@@ -478,6 +500,8 @@ pub fn run() {
             disconnect,
             get_status,
             get_log,
+            get_settings,
+            set_settings,
             probe_latency,
         ])
         .setup(|app| {

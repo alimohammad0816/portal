@@ -41,6 +41,13 @@ pub trait Daemon {
     /// Recent OpenVPN log lines, oldest first.
     fn get_log(&self) -> zbus::Result<Vec<String>>;
 
+    /// Current `Settings` as JSON.
+    fn get_settings(&self) -> zbus::Result<String>;
+
+    /// Replace the settings (JSON `Settings`); returns what was stored.
+    /// Firewall and DNS changes apply immediately.
+    fn set_settings(&self, settings: &str) -> zbus::Result<String>;
+
     /// Version of the running daemon (the installed package version).
     fn version(&self) -> zbus::Result<String>;
 
@@ -58,4 +65,7 @@ pub trait Daemon {
 
     #[zbus(signal)]
     fn log_line(&self, line: String) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn settings_changed(&self, settings: String) -> zbus::Result<()>;
 }

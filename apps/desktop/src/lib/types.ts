@@ -29,7 +29,30 @@ export interface Status {
   rate_in: number;
   rate_out: number;
   error: string | null;
+  firewall_active: boolean;
+  internet_blocked: boolean;
+  dns_servers: string[];
 }
+
+export type FirewallMode = "off" | "auto" | "always";
+
+export type DnsMode = { mode: "vpn" } | { mode: "custom"; servers: string[] };
+
+export interface Settings {
+  firewall: FirewallMode;
+  allow_lan: boolean;
+  block_ipv6: boolean;
+  dns: DnsMode;
+  dns_leak_protection: boolean;
+}
+
+export const defaultSettings: Settings = {
+  firewall: "auto",
+  allow_lan: true,
+  block_ipv6: true,
+  dns: { mode: "vpn" },
+  dns_leak_protection: true,
+};
 
 export interface ImportResult {
   imported: Profile[];
@@ -72,4 +95,7 @@ export const emptyStatus: Status = {
   rate_in: 0,
   rate_out: 0,
   error: null,
+  firewall_active: false,
+  internet_blocked: false,
+  dns_servers: [],
 };

@@ -4,7 +4,7 @@
  * interface without root or a VPN server.
  */
 import type { DaemonInfo, ImportResult, Profile, Status } from "./types";
-import { emptyStatus } from "./types";
+import { defaultSettings, emptyStatus, type Settings as SettingsT } from "./types";
 
 type Handler = (payload: unknown) => void;
 const handlers = new Map<string, Set<Handler>>();
@@ -37,12 +37,21 @@ const profiles: Profile[] = [
   last_connected_at: i === 0 ? now() - 3600 : i === 3 ? now() - 7200 : null,
 }));
 
+let settings: SettingsT = { ...defaultSettings };
 let status: Status = { ...emptyStatus };
+let blockedAfterDrop = false;
+
+function firewallFields(s: Status): Partial<Status> {
+  const active = s.state !== "disconnected";
+  const block = settings.firewall === "always" || (settings.firewall === "auto" && (active || blockedAfterDrop));
+  return { firewall_active: block, internet_blocked: block && s.state !== "connected" };
+}
 const log: string[] = [];
 let timers: number[] = [];
 
 function setStatus(s: Partial<Status>) {
   status = { ...status, ...s };
+  status = { ...status, ...firewallFields(status) };
   emit("tunnel://status", status);
 }
 
@@ -67,7 +76,14 @@ function startSession(id: string) {
   );
   timers.push(
     window.setTimeout(() => {
-      setStatus({ state: "connected", detail: "CONNECTED", connected_since: now(), tunnel_ip: "10.8.0.6", server_ip: "203.0.113.24" });
+      setStatus({
+        state: "connected",
+        detail: "CONNECTED",
+        connected_since: now(),
+        tunnel_ip: "10.8.0.6",
+        server_ip: "203.0.113.24",
+        dns_servers: settings.dns.mode === "custom" ? settings.dns.servers : ["10.8.0.1"],
+      });
       addLog("MOCK: Initialization Sequence Completed");
       let rx = 0;
       let tx = 0;
@@ -117,7 +133,21 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
       startSession(p.id);
       return null;
     }
+    case "get_settings":
+      return settings;
+    case "set_settings":
+      settings = args.settings as SettingsT;
+      if (settings.firewall !== "auto") blockedAfterDrop = false;
+      emit("tunnel://settings", settings);
+      setStatus({});
+      return settings;
+    case "simulate_drop":
+      clearTimers();
+      blockedAfterDrop = settings.firewall === "auto";
+      setStatus({ ...emptyStatus, profile_id: status.profile_id, error: "The connection ended unexpectedly." });
+      return null;
     case "disconnect":
+      blockedAfterDrop = false;
       clearTimers();
       setStatus({ state: "disconnecting" });
       timers.push(window.setTimeout(() => setStatus({ ...emptyStatus, profile_id: status.profile_id }), 300));

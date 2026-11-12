@@ -12,6 +12,10 @@ pub const INTERFACE: &str = "org.tunnelvpn.Daemon1";
 pub const ACTION_CONNECT: &str = "org.tunnelvpn.connect";
 /// polkit action for importing, editing and removing profiles.
 pub const ACTION_MANAGE_PROFILES: &str = "org.tunnelvpn.manage-profiles";
+/// polkit action for changing firewall and DNS settings.
+pub const ACTION_SETTINGS: &str = "org.tunnelvpn.change-settings";
+/// Name of the tunnel interface the daemon creates.
+pub const TUNNEL_IFACE: &str = "tunnel0";
 /// polkit action for installing a signed app update.
 pub const ACTION_UPDATE: &str = "org.tunnelvpn.update";
 

@@ -12,6 +12,7 @@ use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
+use tunnel_core::names::TUNNEL_IFACE;
 
 /// What a session reports back to the manager.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +31,12 @@ pub enum Event {
     Log(String),
     /// Something went wrong; the session is about to end.
     Fatal(String),
+    /// The tunnel's DNS was configured (or failed to be). Sent by the
+    /// manager's own DNS task, not by a backend.
+    DnsApplied {
+        servers: Vec<String>,
+        result: Result<(), String>,
+    },
     /// The session is over.
     Exited,
 }
@@ -74,6 +81,24 @@ pub trait Backend: Send + Sync {
 pub struct OpenVpn {
     pub binary: PathBuf,
     pub runtime_dir: PathBuf,
+    /// OpenVPN 2.7+ runs its own DNS hook unless told not to; we configure
+    /// DNS through systemd-resolved ourselves.
+    pub disable_dns_updown: bool,
+}
+
+impl OpenVpn {
+    pub fn new(binary: PathBuf, runtime_dir: PathBuf) -> Self {
+        let disable_dns_updown = std::process::Command::new(&binary)
+            .arg("--help")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("--dns-updown"))
+            .unwrap_or(false);
+        Self {
+            binary,
+            runtime_dir,
+            disable_dns_updown,
+        }
+    }
 }
 
 impl Backend for OpenVpn {
@@ -88,10 +113,21 @@ impl Backend for OpenVpn {
             .with_context(|| format!("creating {}", self.runtime_dir.display()))?;
         let socket = self.runtime_dir.join(format!("mgmt-{seq}.sock"));
         let _ = std::fs::remove_file(&socket);
+        let dev_type = std::fs::read_to_string(&config)
+            .ok()
+            .and_then(|t| tunnel_core::ovpn::sanitize(&t).ok())
+            .map(|p| p.dev_type)
+            .unwrap_or_else(|| "tun".into());
 
-        let mut child = Command::new(&self.binary)
-            .arg("--config")
-            .arg(&config)
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("--config").arg(&config);
+        // Options after --config override the profile's: a fixed device
+        // name lets the firewall and DNS find the tunnel.
+        cmd.args(["--dev", TUNNEL_IFACE, "--dev-type", &dev_type]);
+        if self.disable_dns_updown {
+            cmd.args(["--dns-updown", "disable"]);
+        }
+        let mut child = cmd
             .arg("--management")
             .arg(&socket)
             .arg("unix")
@@ -99,16 +135,26 @@ impl Backend for OpenVpn {
             .args(["--auth-retry", "none", "--auth-nocache"])
             .args(["--verb", "3", "--suppress-timestamps"])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("starting {}", self.binary.display()))?;
 
+        // OpenVPN logs to stdout; stderr carries the odd early error.
         if let Some(stderr) = child.stderr.take() {
             let ev = events.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = ev.send((seq, Event::Log(line)));
+                }
+            });
+        }
+        if let Some(stdout) = child.stdout.take() {
+            let ev = events.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let _ = ev.send((seq, Event::Log(line)));
                 }
@@ -172,7 +218,7 @@ async fn run_management(
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
 
-    for cmd in ["state on", "bytecount 1", "log on", "hold release"] {
+    for cmd in ["state on", "bytecount 1", "hold release"] {
         wr.write_all(format!("{cmd}\n").as_bytes()).await?;
     }
 
@@ -342,6 +388,9 @@ impl Backend for Mock {
                     _ = tokio::time::sleep(Duration::from_millis(250)) => {}
                 }
             }
+            send(Event::Log(
+                "PUSH: Received control message: 'PUSH_REPLY,redirect-gateway def1,dhcp-option DNS 10.8.0.1,ifconfig 10.8.0.6 255.255.255.0'".into(),
+            ));
             send(Event::State {
                 name: "CONNECTED".into(),
                 tunnel_ip: Some("10.8.0.6".into()),

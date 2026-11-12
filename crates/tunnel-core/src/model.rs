@@ -82,4 +82,88 @@ pub struct Status {
     pub rate_out: u64,
     /// Why the last attempt failed, if it did.
     pub error: Option<String>,
+    /// The kill switch rules are loaded right now.
+    #[serde(default)]
+    pub firewall_active: bool,
+    /// Traffic outside the tunnel is blocked and there is no tunnel: the
+    /// kill switch is holding after a drop, or the firewall is always on.
+    #[serde(default)]
+    pub internet_blocked: bool,
+    /// DNS servers in use for the tunnel, once connected.
+    #[serde(default)]
+    pub dns_servers: Vec<String>,
+}
+
+/// When the kill switch blocks traffic outside the tunnel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirewallMode {
+    /// Never.
+    Off,
+    /// While connecting or connected, and after the tunnel drops until you
+    /// disconnect.
+    #[default]
+    Auto,
+    /// Always, even when disconnected. Only the tunnel (and the LAN, if
+    /// allowed) can be reached.
+    Always,
+}
+
+/// Which DNS servers to use while connected.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode", content = "servers")]
+pub enum DnsMode {
+    /// Servers pushed by the VPN server.
+    #[default]
+    Vpn,
+    /// These servers, reached through the tunnel.
+    Custom(Vec<String>),
+}
+
+/// Daemon-wide settings, stored by `tunneld`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub firewall: FirewallMode,
+    /// Let traffic to private and link-local networks bypass the firewall.
+    pub allow_lan: bool,
+    /// Block IPv6 outside the tunnel while connected, so dual-stack sites
+    /// can't leak around an IPv4-only VPN.
+    pub block_ipv6: bool,
+    pub dns: DnsMode,
+    /// While connected, send all DNS through the tunnel and block port 53
+    /// and 853 everywhere else.
+    pub dns_leak_protection: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            firewall: FirewallMode::Auto,
+            allow_lan: true,
+            block_ipv6: true,
+            dns: DnsMode::Vpn,
+            dns_leak_protection: true,
+        }
+    }
+}
+
+impl Settings {
+    /// Check values that came from a client.
+    pub fn validate(&self) -> Result<(), String> {
+        if let DnsMode::Custom(servers) = &self.dns {
+            if servers.is_empty() {
+                return Err("Add at least one DNS server.".into());
+            }
+            if servers.len() > 4 {
+                return Err("Use at most four DNS servers.".into());
+            }
+            for s in servers {
+                if s.parse::<std::net::IpAddr>().is_err() {
+                    return Err(format!("`{s}` isn't an IP address."));
+                }
+            }
+        }
+        Ok(())
+    }
 }

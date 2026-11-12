@@ -7,5 +7,5 @@ pub mod names;
 pub mod ovpn;
 pub mod proxy;
 
-pub use model::{AuthKind, ConnState, Profile, Status};
+pub use model::{AuthKind, ConnState, DnsMode, FirewallMode, Profile, Settings, Status};
 pub use proxy::DaemonProxy;
