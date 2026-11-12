@@ -8,6 +8,10 @@
     "core:window:allow-start-dragging",
     "core:window:allow-hide",
     "core:window:allow-minimize",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://github.com/*" }]
+    }
   ]
 }

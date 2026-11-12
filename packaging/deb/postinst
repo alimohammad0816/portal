@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs after the .deb is unpacked (install and upgrade).
+set -e
+
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+  # Pick up the D-Bus policy for org.tunnelvpn.Daemon1.
+  systemctl reload dbus.service 2>/dev/null || true
+  systemctl enable tunneld.service >/dev/null 2>&1 || true
+  # On upgrade this swaps in the new daemon; an active VPN reconnects
+  # from the app.
+  systemctl restart tunneld.service || true
+fi
+
+exit 0

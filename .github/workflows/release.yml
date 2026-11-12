@@ -1,0 +1,91 @@
+name: Release
+
+# Push a tag like v0.2.0 (scripts/release.sh does it) to build, sign and
+# publish the .deb. Installed apps find it through the GitHub Releases API.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    # Build on the oldest supported Ubuntu so the package runs on newer ones.
+    runs-on: ubuntu-22.04
+    env:
+      # Baked into the app so it knows where to look for updates.
+      TUNNEL_UPDATE_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag matches Cargo.toml
+        id: version
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $v in Cargo.toml"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev minisign
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: apps/desktop/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build daemon and CLI
+        run: cargo build --release --locked -p tunneld -p tunnel-cli
+
+      - name: Build app and .deb
+        working-directory: apps/desktop
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm tauri build --bundles deb
+
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::Add the MINISIGN_SECRET_KEY repository secret (see README, Releases)."
+            exit 1
+          fi
+          mkdir -p out
+          src=$(ls target/release/bundle/deb/*.deb | head -1)
+          deb="out/tunnel_${VERSION}_amd64.deb"
+          cp "$src" "$deb"
+          dpkg-deb --field "$deb" Package Version Depends
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$deb" -t "tunnel $VERSION"
+          rm -f "$RUNNER_TEMP/minisign.key"
+          minisign -V -p packaging/update-key.pub -m "$deb"
+          (cd out && sha256sum * > SHA256SUMS)
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Tunnel ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: out/*

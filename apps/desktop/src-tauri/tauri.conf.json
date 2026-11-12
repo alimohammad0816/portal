@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tunnel",
-  "version": "0.1.0",
   "identifier": "org.tunnelvpn.Tunnel",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -32,8 +31,27 @@
   "bundle": {
     "active": true,
     "targets": ["deb"],
-    "category": "Network",
+    "category": "Utility",
     "shortDescription": "OpenVPN client with split tunneling",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
+    "longDescription": "Tunnel imports your OpenVPN profiles and connects with one click. It includes a background service (tunneld), a desktop app with a tray icon, and the `tunnel` command-line tool.",
+    "license": "GPL-3.0-or-later",
+    "linux": {
+      "deb": {
+        "depends": ["openvpn", "polkitd | policykit-1", "iputils-ping"],
+        "section": "net",
+        "files": {
+          "/usr/libexec/tunneld": "../../../target/release/tunneld",
+          "/usr/bin/tunnel": "../../../target/release/tunnel",
+          "/usr/lib/systemd/system/tunneld.service": "../../../packaging/systemd/tunneld.service",
+          "/usr/share/dbus-1/system.d/org.tunnelvpn.Daemon1.conf": "../../../packaging/dbus/org.tunnelvpn.Daemon1.conf",
+          "/usr/share/dbus-1/system-services/org.tunnelvpn.Daemon1.service": "../../../packaging/dbus/org.tunnelvpn.Daemon1.service",
+          "/usr/share/polkit-1/actions/org.tunnelvpn.policy": "../../../packaging/polkit/org.tunnelvpn.policy"
+        },
+        "postInstallScript": "../../../packaging/deb/postinst",
+        "preRemoveScript": "../../../packaging/deb/prerm",
+        "postRemoveScript": "../../../packaging/deb/postrm"
+      }
+    }
   }
 }

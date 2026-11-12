@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use tunnel_core::names::{ACTION_CONNECT, ACTION_MANAGE_PROFILES};
+use tunnel_core::names::{ACTION_CONNECT, ACTION_MANAGE_PROFILES, ACTION_UPDATE};
 use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::Value;
@@ -32,6 +32,8 @@ pub struct DaemonIface {
     /// Check polkit before privileged calls. Off on the session bus, where
     /// only the user's own processes can reach us anyway.
     pub use_polkit: bool,
+    /// Where verified update packages are staged.
+    pub cache_dir: std::path::PathBuf,
 }
 
 fn failed(e: anyhow::Error) -> fdo::Error {
@@ -43,19 +45,33 @@ fn to_json<T: serde::Serialize>(v: &T) -> fdo::Result<String> {
 }
 
 impl DaemonIface {
-    async fn authorize(&self, conn: &Connection, hdr: &Header<'_>, action: &str) -> fdo::Result<()> {
+    async fn authorize(
+        &self,
+        conn: &Connection,
+        hdr: &Header<'_>,
+        action: &str,
+    ) -> fdo::Result<()> {
         if !self.use_polkit {
             return Ok(());
         }
-        let sender = hdr.sender().ok_or_else(|| fdo::Error::AccessDenied("no sender".into()))?;
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| fdo::Error::AccessDenied("no sender".into()))?;
         let authority = AuthorityProxy::new(conn).await?;
-        let subject = ("system-bus-name", HashMap::from([("name", Value::from(sender.as_str()))]));
+        let subject = (
+            "system-bus-name",
+            HashMap::from([("name", Value::from(sender.as_str()))]),
+        );
         // 1 = AllowUserInteraction: polkit may show a password prompt.
         let (ok, _, _) = authority
             .check_authorization(&subject, action, &HashMap::new(), 1, "")
             .await
             .map_err(|e| fdo::Error::AccessDenied(format!("polkit: {e}")))?;
-        if ok { Ok(()) } else { Err(fdo::Error::AccessDenied("Not authorized.".into())) }
+        if ok {
+            Ok(())
+        } else {
+            Err(fdo::Error::AccessDenied("Not authorized.".into()))
+        }
     }
 }
 
@@ -73,7 +89,12 @@ impl DaemonIface {
         content: String,
     ) -> fdo::Result<String> {
         self.authorize(conn, &hdr, ACTION_MANAGE_PROFILES).await?;
-        let p = self.mgr.lock().await.import(&file_name, &content).map_err(failed)?;
+        let p = self
+            .mgr
+            .lock()
+            .await
+            .import(&file_name, &content)
+            .map_err(failed)?;
         to_json(&p)
     }
 
@@ -87,7 +108,12 @@ impl DaemonIface {
         country: String,
     ) -> fdo::Result<String> {
         self.authorize(conn, &hdr, ACTION_MANAGE_PROFILES).await?;
-        let p = self.mgr.lock().await.update(&id, &name, &group, &country).map_err(failed)?;
+        let p = self
+            .mgr
+            .lock()
+            .await
+            .update(&id, &name, &group, &country)
+            .map_err(failed)?;
         to_json(&p)
     }
 
@@ -116,14 +142,27 @@ impl DaemonIface {
             password,
             response: (!response.is_empty()).then_some(response),
         };
-        let old = self.mgr.lock().await.begin_connect(&id, &creds).map_err(failed)?;
+        let old = self
+            .mgr
+            .lock()
+            .await
+            .begin_connect(&id, &creds)
+            .map_err(failed)?;
         if let Some(old) = old {
             old.stop().await;
         }
-        self.mgr.lock().await.finish_connect(&id, creds).map_err(failed)
+        self.mgr
+            .lock()
+            .await
+            .finish_connect(&id, creds)
+            .map_err(failed)
     }
 
-    async fn disconnect(&self, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> fdo::Result<()> {
+    async fn disconnect(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<()> {
         self.authorize(conn, &hdr, ACTION_CONNECT).await?;
         let handle = self.mgr.lock().await.begin_disconnect();
         if let Some(h) = handle {
@@ -138,6 +177,26 @@ impl DaemonIface {
 
     async fn get_log(&self) -> Vec<String> {
         self.mgr.lock().await.log()
+    }
+
+    async fn version(&self) -> String {
+        crate::update::current_version().to_string()
+    }
+
+    async fn install_update(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+        package: zbus::zvariant::OwnedFd,
+        signature: String,
+    ) -> fdo::Result<String> {
+        self.authorize(conn, &hdr, ACTION_UPDATE).await?;
+        let file = std::fs::File::from(std::os::fd::OwnedFd::from(package));
+        let cache = self.cache_dir.clone();
+        tokio::task::spawn_blocking(move || crate::update::install(file, &signature, &cache))
+            .await
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?
+            .map_err(failed)
     }
 
     #[zbus(signal)]

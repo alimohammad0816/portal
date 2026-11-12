@@ -1,7 +1,18 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Download, FileUp, Loader2, Power, Search, Shield, SlidersHorizontal, X } from "lucide-react";
+import {
+  ArrowUpCircle,
+  Download,
+  FileUp,
+  Loader2,
+  Power,
+  RotateCw,
+  Search,
+  Shield,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { type Credentials, CredentialsDialog } from "@/components/CredentialsDialog";
@@ -10,6 +21,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sparkline } from "@/components/Sparkline";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { UpdateDialog } from "@/components/UpdateDialog";
 import { WorldMap } from "@/components/WorldMap";
 import {
   api,
@@ -22,14 +34,35 @@ import {
   onStatus,
   type Profile,
   type Status,
+  type UpdateInfo,
+  type Versions,
 } from "@/lib/api";
+import { isNewer } from "@/lib/version";
 import { formatDuration, formatRate } from "@/lib/format";
 import { countryLocation, homeLocation } from "@/lib/geo";
 import { cn } from "@/lib/utils";
 
 type ListTab = "all" | "favorites" | "recent";
 const FAV_KEY = "tunnel.favorites";
+const AUTO_UPDATE_KEY = "tunnel.autoUpdate";
 const HISTORY = 30;
+
+function readPref(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writePref(key: string, value: boolean) {
+  try {
+    localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    /* not persisted; fine */
+  }
+}
 
 function loadFavorites(): Set<string> {
   try {
@@ -63,8 +96,46 @@ export function App() {
   const [dragging, setDragging] = useState(false);
   const [rates, setRates] = useState<{ rx: number[]; tx: number[] }>({ rx: [], tx: [] });
   const [now, setNow] = useState(() => Date.now());
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [autoCheck, setAutoCheck] = useState(() => readPref(AUTO_UPDATE_KEY, true));
+  const [checking, setChecking] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [versions, setVersions] = useState<Versions | null>(null);
 
   const home = useMemo(homeLocation, []);
+
+  const checkUpdates = useCallback(async () => {
+    setChecking(true);
+    try {
+      setUpdateInfo(await api.checkUpdate());
+      setUpdateError(null);
+    } catch (e) {
+      setUpdateError(errorText(e));
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  const refreshVersions = useCallback(async () => {
+    try {
+      setVersions(await api.versions());
+    } catch {
+      /* daemon unreachable; shown elsewhere */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshVersions();
+    if (!autoCheck) return;
+    checkUpdates();
+    const t = setInterval(checkUpdates, 6 * 3600 * 1000);
+    return () => clearInterval(t);
+  }, [autoCheck, checkUpdates, refreshVersions]);
+
+  // After an update the service restarts first; this window is still the old build.
+  const needsRestart = !!versions?.daemon && isNewer(versions.daemon, versions.app);
 
   const refreshProfiles = useCallback(async () => {
     try {
@@ -99,7 +170,10 @@ export function App() {
       onLog((line) => setLog((l) => [...l.slice(-999), line])),
       onDaemon((info) => {
         setDaemon(info);
-        if (info.reachable) refreshAll().catch(() => {});
+        if (info.reachable) {
+          refreshAll().catch(() => {});
+          api.versions().then(setVersions).catch(() => {});
+        }
       }),
     ];
     return () => {
@@ -276,6 +350,27 @@ export function App() {
           </span>
         </div>
         <div className="flex items-center gap-0.5">
+          {needsRestart ? (
+            <Button size="sm" className="mr-1 h-7 rounded-full px-3 text-xs" onClick={() => api.restartApp()}>
+              <RotateCw />
+              Restart to update
+            </Button>
+          ) : installing ? (
+            <span className="mr-1 flex h-7 items-center gap-1.5 rounded-full border px-3 text-xs text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              Installing {installing}
+            </span>
+          ) : updateInfo?.available ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="mr-1 h-7 rounded-full px-3 text-xs"
+              onClick={() => setUpdateOpen(true)}
+            >
+              <ArrowUpCircle />
+              Update
+            </Button>
+          ) : null}
           <Button variant="ghost" size="icon" aria-label="Import profiles" onClick={pickFiles} className="text-muted-foreground">
             <Download />
           </Button>
@@ -430,6 +525,29 @@ export function App() {
         profiles={profiles}
         log={log}
         onProfilesChanged={refreshProfiles}
+        updates={{
+          autoCheck,
+          onAutoCheckChange: (on) => {
+            setAutoCheck(on);
+            writePref(AUTO_UPDATE_KEY, on);
+          },
+          info: updateInfo,
+          daemonVersion: versions?.daemon ?? null,
+          checking,
+          error: updateError,
+          onCheckNow: checkUpdates,
+          onShowUpdate: () => {
+            setSettingsOpen(false);
+            setUpdateOpen(true);
+          },
+        }}
+      />
+      <UpdateDialog
+        release={updateInfo?.available ?? null}
+        current={updateInfo?.current ?? versions?.app ?? ""}
+        open={updateOpen}
+        onOpenChange={setUpdateOpen}
+        onInstalling={(v) => setInstalling(v)}
       />
     </div>
   );

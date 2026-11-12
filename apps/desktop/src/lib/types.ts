@@ -42,6 +42,24 @@ export interface DaemonInfo {
   error: string | null;
 }
 
+export interface Release {
+  version: string;
+  notes: string;
+  url: string;
+  published_at: string;
+}
+
+export interface UpdateInfo {
+  current: string;
+  enabled: boolean;
+  available: Release | null;
+}
+
+export interface Versions {
+  app: string;
+  daemon: string | null;
+}
+
 export const emptyStatus: Status = {
   state: "disconnected",
   profile_id: null,

@@ -17,6 +17,18 @@
     </defaults>
   </action>
 
+  <!-- Only packages signed by the release key and newer than the
+       installed version get this far, like PackageKit's signed updates. -->
+  <action id="org.tunnelvpn.update">
+    <description>Install Tunnel updates</description>
+    <message>Authentication is required to update Tunnel</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
   <action id="org.tunnelvpn.manage-profiles">
     <description>Import, edit and remove VPN profiles</description>
     <message>Authentication is required to change VPN profiles</message>

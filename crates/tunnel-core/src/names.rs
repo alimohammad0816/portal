@@ -12,3 +12,9 @@ pub const INTERFACE: &str = "org.tunnelvpn.Daemon1";
 pub const ACTION_CONNECT: &str = "org.tunnelvpn.connect";
 /// polkit action for importing, editing and removing profiles.
 pub const ACTION_MANAGE_PROFILES: &str = "org.tunnelvpn.manage-profiles";
+/// polkit action for installing a signed app update.
+pub const ACTION_UPDATE: &str = "org.tunnelvpn.update";
+
+/// GitHub `owner/repo` that publishes releases, baked in at build time by
+/// the release workflow. `None` in local builds: update checks are off.
+pub const UPDATE_REPO: Option<&str> = option_env!("TUNNEL_UPDATE_REPO");

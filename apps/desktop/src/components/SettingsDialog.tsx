@@ -1,11 +1,13 @@
-import { Copy, Trash2 } from "lucide-react";
+import { Copy, Download, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { api, errorText, type Profile } from "@/lib/api";
+import { api, errorText, type Profile, type UpdateInfo } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
 
 function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () => void }) {
@@ -123,18 +125,80 @@ function LogView({ lines }: { lines: string[] }) {
   );
 }
 
+export interface UpdateSettings {
+  autoCheck: boolean;
+  onAutoCheckChange: (on: boolean) => void;
+  info: UpdateInfo | null;
+  daemonVersion: string | null;
+  checking: boolean;
+  error: string | null;
+  onCheckNow: () => void;
+  onShowUpdate: () => void;
+}
+
+function AboutView({ u }: { u: UpdateSettings }) {
+  const enabled = u.info?.enabled !== false;
+  return (
+    <div className="grid gap-4 pt-1">
+      <div className="grid grid-cols-2 gap-3 rounded-lg border p-3 text-[13px]">
+        <div className="grid gap-0.5">
+          <span className="text-xs text-muted-foreground">App</span>
+          <span className="font-mono">{u.info?.current ?? "—"}</span>
+        </div>
+        <div className="grid gap-0.5">
+          <span className="text-xs text-muted-foreground">Service</span>
+          <span className="font-mono">{u.daemonVersion ?? "not running"}</span>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <Label htmlFor="auto-update" className="grid gap-1 font-normal">
+          <span className="text-[13px] font-medium">Check for updates automatically</span>
+          <span className="text-xs text-muted-foreground">Asks GitHub for new releases at start and every few hours.</span>
+        </Label>
+        <Switch id="auto-update" checked={u.autoCheck} onCheckedChange={u.onAutoCheckChange} disabled={!enabled} />
+      </div>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs text-muted-foreground">
+          {!enabled
+            ? "This is a local build, so it doesn't check for updates."
+            : u.error
+              ? <span className="text-destructive">{u.error}</span>
+              : u.info?.available
+                ? `Version ${u.info.available.version} is available.`
+                : u.info
+                  ? "You're up to date."
+                  : ""}
+        </span>
+        {u.info?.available ? (
+          <Button size="sm" onClick={u.onShowUpdate}>
+            <Download />
+            Update
+          </Button>
+        ) : (
+          <Button size="sm" variant="outline" onClick={u.onCheckNow} disabled={u.checking || !enabled}>
+            {u.checking ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            Check now
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function SettingsDialog({
   open,
   onOpenChange,
   profiles,
   log,
   onProfilesChanged,
+  updates,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   profiles: Profile[];
   log: string[];
   onProfilesChanged: () => void;
+  updates: UpdateSettings;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -147,6 +211,7 @@ export function SettingsDialog({
           <TabsList>
             <TabsTrigger value="profiles">Profiles</TabsTrigger>
             <TabsTrigger value="log">Log</TabsTrigger>
+            <TabsTrigger value="about">About</TabsTrigger>
           </TabsList>
           <TabsContent value="profiles">
             <div className="scroll-subtle max-h-[26rem] overflow-y-auto pr-1">
@@ -159,6 +224,9 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="log">
             <LogView lines={log} />
+          </TabsContent>
+          <TabsContent value="about">
+            <AboutView u={updates} />
           </TabsContent>
         </Tabs>
       </DialogContent>

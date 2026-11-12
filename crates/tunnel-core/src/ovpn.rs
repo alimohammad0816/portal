@@ -156,8 +156,16 @@ impl ParsedConfig {
 
 /// A logical line of a config: either a directive or an inline block.
 enum Item<'a> {
-    Directive { line: usize, raw: &'a str, words: Vec<String> },
-    Block { line: usize, tag: String, body: Vec<&'a str> },
+    Directive {
+        line: usize,
+        raw: &'a str,
+        words: Vec<String>,
+    },
+    Block {
+        line: usize,
+        tag: String,
+        body: Vec<&'a str>,
+    },
     Other(&'a str),
 }
 
@@ -275,7 +283,10 @@ fn normalize_proto(p: &str) -> Option<&'static str> {
 }
 
 fn parse_port(value: &str, line: usize) -> Result<u16, ConfigError> {
-    value.parse::<u16>().map_err(|_| ConfigError::BadPort { value: value.to_string(), line })
+    value.parse::<u16>().map_err(|_| ConfigError::BadPort {
+        value: value.to_string(),
+        line,
+    })
 }
 
 /// Validate a config and produce the text the daemon will run.
@@ -294,55 +305,68 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
     let mut challenge = None;
     let mut out = String::with_capacity(text.len());
 
-    let mut check = |words: &[String], line: usize, out: &mut String, raw: &str| -> Result<(), ConfigError> {
-        let name = words[0].trim_start_matches("--").to_ascii_lowercase();
-        if FORBIDDEN.contains(&name.as_str()) {
-            return Err(ConfigError::Forbidden { directive: name, line });
-        }
-        if FILE_DIRECTIVES.contains(&name.as_str()) {
-            let arg = words.get(1).map(String::as_str).unwrap_or("");
-            if arg != "[inline]" {
-                return Err(ConfigError::ExternalFile { directive: name, line });
+    let mut check =
+        |words: &[String], line: usize, out: &mut String, raw: &str| -> Result<(), ConfigError> {
+            let name = words[0].trim_start_matches("--").to_ascii_lowercase();
+            if FORBIDDEN.contains(&name.as_str()) {
+                return Err(ConfigError::Forbidden {
+                    directive: name,
+                    line,
+                });
             }
-        }
-        match name.as_str() {
-            "remote" => {
-                let host = words.get(1).cloned().unwrap_or_default();
-                let port = words.get(2).map(|p| parse_port(p, line)).transpose()?;
-                let proto = words.get(3).and_then(|p| normalize_proto(p)).map(str::to_string);
-                if !host.is_empty() {
-                    raw_remotes.push((host, port, proto));
+            if FILE_DIRECTIVES.contains(&name.as_str()) {
+                let arg = words.get(1).map(String::as_str).unwrap_or("");
+                if arg != "[inline]" {
+                    return Err(ConfigError::ExternalFile {
+                        directive: name,
+                        line,
+                    });
                 }
             }
-            "proto" => {
-                if let Some(p) = words.get(1).and_then(|p| normalize_proto(p)) {
-                    default_proto = p.to_string();
+            match name.as_str() {
+                "remote" => {
+                    let host = words.get(1).cloned().unwrap_or_default();
+                    let port = words.get(2).map(|p| parse_port(p, line)).transpose()?;
+                    let proto = words
+                        .get(3)
+                        .and_then(|p| normalize_proto(p))
+                        .map(str::to_string);
+                    if !host.is_empty() {
+                        raw_remotes.push((host, port, proto));
+                    }
                 }
-            }
-            "port" | "rport" => {
-                if let Some(p) = words.get(1) {
-                    default_port = parse_port(p, line)?;
+                "proto" => {
+                    if let Some(p) = words.get(1).and_then(|p| normalize_proto(p)) {
+                        default_proto = p.to_string();
+                    }
                 }
+                "port" | "rport" => {
+                    if let Some(p) = words.get(1) {
+                        default_port = parse_port(p, line)?;
+                    }
+                }
+                "auth-user-pass" => {
+                    auth_user_pass = true;
+                    // Credentials come from the user over the management socket,
+                    // never from a file the config names.
+                    out.push_str("auth-user-pass\n");
+                    return Ok(());
+                }
+                "static-challenge" => {
+                    challenge = words.get(1).cloned();
+                }
+                "http-proxy" if words.len() > 3 => {
+                    return Err(ConfigError::ExternalFile {
+                        directive: name,
+                        line,
+                    });
+                }
+                _ => {}
             }
-            "auth-user-pass" => {
-                auth_user_pass = true;
-                // Credentials come from the user over the management socket,
-                // never from a file the config names.
-                out.push_str("auth-user-pass\n");
-                return Ok(());
-            }
-            "static-challenge" => {
-                challenge = words.get(1).cloned();
-            }
-            "http-proxy" if words.len() > 3 => {
-                return Err(ConfigError::ExternalFile { directive: name, line });
-            }
-            _ => {}
-        }
-        out.push_str(raw.trim_end());
-        out.push('\n');
-        Ok(())
-    };
+            out.push_str(raw.trim_end());
+            out.push('\n');
+            Ok(())
+        };
 
     for item in &items {
         match item {
@@ -353,7 +377,10 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
             Item::Directive { line, raw, words } => check(words, *line, &mut out, raw)?,
             Item::Block { line, tag, body } => {
                 if !INLINE_BLOCKS.contains(&tag.as_str()) {
-                    return Err(ConfigError::UnknownBlock { tag: tag.clone(), line: *line });
+                    return Err(ConfigError::UnknownBlock {
+                        tag: tag.clone(),
+                        line: *line,
+                    });
                 }
                 if tag == "auth-user-pass" {
                     inline_creds = true;
@@ -363,12 +390,16 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
                     for (offset, inner) in body.iter().enumerate() {
                         let inner_line = line + offset + 1;
                         let trimmed = inner.trim();
-                        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+                        if trimmed.is_empty()
+                            || trimmed.starts_with('#')
+                            || trimmed.starts_with(';')
+                        {
                             out.push_str(inner.trim_end());
                             out.push('\n');
                             continue;
                         }
-                        let words = tokenize(trimmed).ok_or(ConfigError::UnterminatedQuote { line: inner_line })?;
+                        let words = tokenize(trimmed)
+                            .ok_or(ConfigError::UnterminatedQuote { line: inner_line })?;
                         check(&words, inner_line, &mut out, inner)?;
                     }
                 } else {
@@ -400,7 +431,12 @@ pub fn sanitize(text: &str) -> Result<ParsedConfig, ConfigError> {
         (true, true) => AuthKind::UserPassChallenge,
     };
 
-    Ok(ParsedConfig { remotes, auth, challenge, sanitized: out })
+    Ok(ParsedConfig {
+        remotes,
+        auth,
+        challenge,
+        sanitized: out,
+    })
 }
 
 /// Replace file references (`ca ca.crt`, `tls-auth ta.key 1`, ...) with inline
@@ -448,7 +484,10 @@ pub fn inline_files(text: &str, base_dir: &Path) -> Result<String, ConfigError> 
 }
 
 fn read_small(path: &Path) -> Result<String, ConfigError> {
-    let err = |reason: String| ConfigError::Read { path: path.display().to_string(), reason };
+    let err = |reason: String| ConfigError::Read {
+        path: path.display().to_string(),
+        reason,
+    };
     let meta = std::fs::metadata(path).map_err(|e| err(e.to_string()))?;
     if meta.len() as usize > MAX_CONFIG_BYTES {
         return Err(err("file is too large".into()));
@@ -492,37 +531,79 @@ mod tests {
     #[test]
     fn parses_basic_profile() {
         let p = sanitize(BASIC).unwrap();
-        assert_eq!(p.primary(), &Remote { host: "de-fra-02.example.net".into(), port: 1194, proto: "udp".into() });
+        assert_eq!(
+            p.primary(),
+            &Remote {
+                host: "de-fra-02.example.net".into(),
+                port: 1194,
+                proto: "udp".into()
+            }
+        );
         assert_eq!(p.auth, AuthKind::UserPass);
         assert!(p.sanitized.contains("<ca>"));
     }
 
     #[test]
     fn remote_inherits_port_and_proto() {
-        let p = sanitize("client\nproto tcp-client\nport 443\nremote a.example\nremote b.example 8443 udp\n").unwrap();
-        assert_eq!(p.remotes[0], Remote { host: "a.example".into(), port: 443, proto: "tcp".into() });
-        assert_eq!(p.remotes[1], Remote { host: "b.example".into(), port: 8443, proto: "udp".into() });
+        let p = sanitize(
+            "client\nproto tcp-client\nport 443\nremote a.example\nremote b.example 8443 udp\n",
+        )
+        .unwrap();
+        assert_eq!(
+            p.remotes[0],
+            Remote {
+                host: "a.example".into(),
+                port: 443,
+                proto: "tcp".into()
+            }
+        );
+        assert_eq!(
+            p.remotes[1],
+            Remote {
+                host: "b.example".into(),
+                port: 8443,
+                proto: "udp".into()
+            }
+        );
         assert_eq!(p.auth, AuthKind::Certificate);
     }
 
     #[test]
     fn rejects_script_hooks() {
-        for d in ["up /tmp/x.sh", "script-security 2", "plugin /lib/evil.so", "--down x", "management 0.0.0.0 7505"] {
+        for d in [
+            "up /tmp/x.sh",
+            "script-security 2",
+            "plugin /lib/evil.so",
+            "--down x",
+            "management 0.0.0.0 7505",
+        ] {
             let cfg = format!("client\nremote a.example\n{d}\n");
-            assert!(matches!(sanitize(&cfg), Err(ConfigError::Forbidden { line: 3, .. })), "{d}");
+            assert!(
+                matches!(sanitize(&cfg), Err(ConfigError::Forbidden { line: 3, .. })),
+                "{d}"
+            );
         }
     }
 
     #[test]
     fn rejects_hooks_inside_connection_blocks() {
         let cfg = "client\n<connection>\nremote a.example 1194 udp\nup /tmp/x\n</connection>\n";
-        assert!(matches!(sanitize(cfg), Err(ConfigError::Forbidden { line: 4, .. })));
+        assert!(matches!(
+            sanitize(cfg),
+            Err(ConfigError::Forbidden { line: 4, .. })
+        ));
     }
 
     #[test]
     fn rejects_external_files() {
         let err = sanitize("client\nremote a.example\nca /etc/shadow\n").unwrap_err();
-        assert_eq!(err, ConfigError::ExternalFile { directive: "ca".into(), line: 3 });
+        assert_eq!(
+            err,
+            ConfigError::ExternalFile {
+                directive: "ca".into(),
+                line: 3
+            }
+        );
     }
 
     #[test]
@@ -534,24 +615,34 @@ mod tests {
 
     #[test]
     fn detects_static_challenge() {
-        let p = sanitize("client\nremote a.example\nauth-user-pass\nstatic-challenge \"Enter OTP\" 1\n").unwrap();
+        let p = sanitize(
+            "client\nremote a.example\nauth-user-pass\nstatic-challenge \"Enter OTP\" 1\n",
+        )
+        .unwrap();
         assert_eq!(p.auth, AuthKind::UserPassChallenge);
         assert_eq!(p.challenge.as_deref(), Some("Enter OTP"));
     }
 
     #[test]
     fn requires_a_remote() {
-        assert_eq!(sanitize("client\ndev tun\n").unwrap_err(), ConfigError::NoRemote);
+        assert_eq!(
+            sanitize("client\ndev tun\n").unwrap_err(),
+            ConfigError::NoRemote
+        );
     }
 
     #[test]
     fn reports_unterminated_blocks() {
-        assert!(matches!(sanitize("client\nremote a\n<ca>\nAAA\n"), Err(ConfigError::UnterminatedBlock { line: 3, .. })));
+        assert!(matches!(
+            sanitize("client\nremote a\n<ca>\nAAA\n"),
+            Err(ConfigError::UnterminatedBlock { line: 3, .. })
+        ));
     }
 
     #[test]
     fn ignores_comments_and_quotes() {
-        let p = sanitize("# up /x\n; plugin y\nclient\nremote \"a b.example\" 1194 # trailing\n").unwrap();
+        let p = sanitize("# up /x\n; plugin y\nclient\nremote \"a b.example\" 1194 # trailing\n")
+            .unwrap();
         assert_eq!(p.primary().host, "a b.example");
     }
 
@@ -560,7 +651,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("ca.crt"), "CA-DATA\n").unwrap();
         std::fs::write(dir.path().join("ta.key"), "TA-DATA\n").unwrap();
-        let out = inline_files("client\nremote a.example\nca ca.crt\ntls-auth ta.key 1\n", dir.path()).unwrap();
+        let out = inline_files(
+            "client\nremote a.example\nca ca.crt\ntls-auth ta.key 1\n",
+            dir.path(),
+        )
+        .unwrap();
         assert!(out.contains("<ca>\nCA-DATA\n</ca>"));
         assert!(out.contains("<tls-auth>\nTA-DATA\n</tls-auth>\nkey-direction 1"));
         assert!(sanitize(&out).is_ok());
@@ -568,7 +663,10 @@ mod tests {
 
     #[test]
     fn guesses_countries() {
-        assert_eq!(guess_country(&["de-fra-02.example.net"]).as_deref(), Some("DE"));
+        assert_eq!(
+            guess_country(&["de-fra-02.example.net"]).as_deref(),
+            Some("DE")
+        );
         assert_eq!(guess_country(&["us1.vpn.example"]).as_deref(), Some("US"));
         assert_eq!(guess_country(&["uk-lon.ovpn"]).as_deref(), Some("GB"));
         assert_eq!(guess_country(&["vpn.office.example", "office.ovpn"]), None);

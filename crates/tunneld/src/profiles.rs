@@ -54,7 +54,10 @@ impl ProfileStore {
     }
 
     fn save_index(&self) -> Result<()> {
-        write_private(&self.dir.join("index.json"), &serde_json::to_vec_pretty(&self.profiles)?)
+        write_private(
+            &self.dir.join("index.json"),
+            &serde_json::to_vec_pretty(&self.profiles)?,
+        )
     }
 
     pub fn list(&self) -> &[Profile] {
@@ -68,7 +71,8 @@ impl ProfileStore {
     /// Path of the sanitized config for `id`. The id is checked against the
     /// index, so it can never name a file outside the store.
     pub fn config_path(&self, id: &str) -> Option<PathBuf> {
-        self.get(id).map(|p| self.dir.join(format!("{}.ovpn", p.id)))
+        self.get(id)
+            .map(|p| self.dir.join(format!("{}.ovpn", p.id)))
     }
 
     pub fn import(&mut self, file_name: &str, content: &str) -> Result<Profile> {
@@ -95,7 +99,10 @@ impl ProfileStore {
             imported_at: now(),
             last_connected_at: None,
         };
-        write_private(&self.dir.join(format!("{id}.ovpn")), parsed.sanitized.as_bytes())?;
+        write_private(
+            &self.dir.join(format!("{id}.ovpn")),
+            parsed.sanitized.as_bytes(),
+        )?;
         self.profiles.push(profile.clone());
         self.save_index()?;
         Ok(profile)
@@ -143,7 +150,8 @@ impl ProfileStore {
     }
 
     pub fn needs_credentials(&self, id: &str) -> bool {
-        self.get(id).is_some_and(|p| p.auth != AuthKind::Certificate)
+        self.get(id)
+            .is_some_and(|p| p.auth != AuthKind::Certificate)
     }
 }
 
@@ -151,7 +159,11 @@ impl ProfileStore {
 /// tidy separators and leave the rest to the user.
 fn pretty_name(stem: &str) -> String {
     let s: String = stem.replace(['_', '.'], " ").trim().to_string();
-    if s.is_empty() { "Profile".into() } else { s.chars().take(80).collect() }
+    if s.is_empty() {
+        "Profile".into()
+    } else {
+        s.chars().take(80).collect()
+    }
 }
 
 #[cfg(test)]
@@ -169,13 +181,21 @@ mod tests {
         assert_eq!(p.proto, "tcp");
         assert!(store.needs_credentials(&p.id));
         let path = store.config_path(&p.id).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let reopened = ProfileStore::open(dir.path().join("profiles")).unwrap();
         assert_eq!(reopened.list().len(), 1);
 
-        let u = store.update(&p.id, "Amsterdam", "Provider A", "nl").unwrap();
-        assert_eq!((u.name.as_str(), u.group.as_str()), ("Amsterdam", "Provider A"));
+        let u = store
+            .update(&p.id, "Amsterdam", "Provider A", "nl")
+            .unwrap();
+        assert_eq!(
+            (u.name.as_str(), u.group.as_str()),
+            ("Amsterdam", "Provider A")
+        );
 
         store.remove(&p.id).unwrap();
         assert!(store.list().is_empty());
@@ -186,7 +206,11 @@ mod tests {
     fn rejects_unsafe_configs() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ProfileStore::open(dir.path().to_path_buf()).unwrap();
-        assert!(store.import("x.ovpn", "client\nremote a\nup /bin/sh\n").is_err());
+        assert!(
+            store
+                .import("x.ovpn", "client\nremote a\nup /bin/sh\n")
+                .is_err()
+        );
         assert!(store.list().is_empty());
     }
 

@@ -15,7 +15,11 @@ pub async fn probe(host: &str, port: u16, proto: &str) -> Option<u32> {
     if host.is_empty() || host.starts_with('-') || host.len() > 253 {
         return None;
     }
-    if proto == "tcp" { tcp(host, port).await } else { icmp(host).await }
+    if proto == "tcp" {
+        tcp(host, port).await
+    } else {
+        icmp(host).await
+    }
 }
 
 async fn tcp(host: &str, port: u16) -> Option<u32> {
@@ -30,7 +34,9 @@ async fn tcp(host: &str, port: u16) -> Option<u32> {
 async fn icmp(host: &str) -> Option<u32> {
     let out = tokio::time::timeout(
         TIMEOUT + Duration::from_millis(500),
-        Command::new("ping").args(["-c", "1", "-n", "-W", "2", "--", host]).output(),
+        Command::new("ping")
+            .args(["-c", "1", "-n", "-W", "2", "--", host])
+            .output(),
     )
     .await
     .ok()?

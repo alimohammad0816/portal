@@ -2,6 +2,7 @@
 //! icon, and keeps running in the tray when the window is closed.
 
 mod latency;
+mod updater;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -48,7 +49,9 @@ impl Daemon {
 fn err(e: zbus::Error) -> String {
     match e {
         zbus::Error::MethodError(name, msg, _) => match (name.as_str(), msg) {
-            ("org.freedesktop.DBus.Error.ServiceUnknown", _) => "The Tunnel service isn't running.".into(),
+            ("org.freedesktop.DBus.Error.ServiceUnknown", _) => {
+                "The Tunnel service isn't running.".into()
+            }
             ("org.freedesktop.DBus.Error.AccessDenied", Some(m)) => format!("Not allowed: {m}"),
             (_, Some(m)) => m,
             (n, None) => n.to_string(),
@@ -87,11 +90,23 @@ struct ImportResult {
 
 #[tauri::command]
 async fn daemon_info(daemon: State<'_, Daemon>) -> Result<DaemonInfo, String> {
-    let bus = if use_session_bus() { "session" } else { "system" };
+    let bus = if use_session_bus() {
+        "session"
+    } else {
+        "system"
+    };
     let probe = async { daemon.get().await?.get_status().await.map_err(err) };
     Ok(match probe.await {
-        Ok(_) => DaemonInfo { bus, reachable: true, error: None },
-        Err(e) => DaemonInfo { bus, reachable: false, error: Some(e) },
+        Ok(_) => DaemonInfo {
+            bus,
+            reachable: true,
+            error: None,
+        },
+        Err(e) => DaemonInfo {
+            bus,
+            reachable: false,
+            error: Some(e),
+        },
     })
 }
 
@@ -101,16 +116,28 @@ async fn list_profiles(daemon: State<'_, Daemon>) -> Result<Vec<Profile>, String
 }
 
 #[tauri::command]
-async fn import_profiles(daemon: State<'_, Daemon>, paths: Vec<String>) -> Result<ImportResult, String> {
+async fn import_profiles(
+    daemon: State<'_, Daemon>,
+    paths: Vec<String>,
+) -> Result<ImportResult, String> {
     let d = daemon.get().await?;
-    let mut out = ImportResult { imported: Vec::new(), errors: Vec::new() };
+    let mut out = ImportResult {
+        imported: Vec::new(),
+        errors: Vec::new(),
+    };
     for raw in paths {
         let path = PathBuf::from(&raw);
-        let file = path.file_name().and_then(|n| n.to_str()).unwrap_or(&raw).to_string();
+        let file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&raw)
+            .to_string();
         // Files are read here, as the user, and embedded before the daemon
         // (running as root) ever sees them.
         let result = async {
-            let text = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
+            let text = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| e.to_string())?;
             let base = path.parent().map(PathBuf::from).unwrap_or_default();
             let inlined = ovpn::inline_files(&text, &base).map_err(|e| e.to_string())?;
             parse::<Profile>(d.import_profile(&file, &inlined).await.map_err(err)?)
@@ -132,7 +159,14 @@ async fn update_profile(
     group: String,
     country: String,
 ) -> Result<Profile, String> {
-    parse(daemon.get().await?.update_profile(&id, &name, &group, &country).await.map_err(err)?)
+    parse(
+        daemon
+            .get()
+            .await?
+            .update_profile(&id, &name, &group, &country)
+            .await
+            .map_err(err)?,
+    )
 }
 
 #[tauri::command]
@@ -148,7 +182,12 @@ async fn connect(
     password: String,
     response: String,
 ) -> Result<(), String> {
-    daemon.get().await?.connect(&id, &username, &password, &response).await.map_err(err)
+    daemon
+        .get()
+        .await?
+        .connect(&id, &username, &password, &response)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -169,6 +208,68 @@ async fn get_log(daemon: State<'_, Daemon>) -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn probe_latency(host: String, port: u16, proto: String) -> Result<Option<u32>, String> {
     Ok(latency::probe(&host, port, &proto).await)
+}
+
+// --------------------------------------------------------------- updates --
+
+/// The last release found by `check_update`. Installs only ever use URLs
+/// that came from GitHub here, never ones passed in from the web view.
+#[derive(Default)]
+struct Updates {
+    latest: Mutex<Option<updater::Release>>,
+}
+
+#[derive(Serialize)]
+struct Versions {
+    app: String,
+    daemon: Option<String>,
+}
+
+#[tauri::command]
+async fn versions(daemon: State<'_, Daemon>) -> Result<Versions, String> {
+    let daemon_version = match daemon.get().await {
+        Ok(d) => d.version().await.ok(),
+        Err(_) => None,
+    };
+    Ok(Versions {
+        app: env!("CARGO_PKG_VERSION").to_string(),
+        daemon: daemon_version,
+    })
+}
+
+#[tauri::command]
+async fn check_update(updates: State<'_, Updates>) -> Result<updater::UpdateInfo, String> {
+    let info = updater::check().await?;
+    *updates.latest.lock().await = info.available.clone();
+    Ok(info)
+}
+
+#[tauri::command]
+async fn install_update(
+    daemon: State<'_, Daemon>,
+    updates: State<'_, Updates>,
+) -> Result<String, String> {
+    use std::os::fd::AsFd;
+    let rel = updates
+        .latest
+        .lock()
+        .await
+        .clone()
+        .ok_or("There's no update to install.")?;
+    let (path, signature) = updater::download(&rel).await?;
+    let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let d = daemon.get().await?;
+    let version = d
+        .install_update(zbus::zvariant::Fd::from(file.as_fd()), &signature)
+        .await
+        .map_err(err)?;
+    let _ = std::fs::remove_file(&path);
+    Ok(version)
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 // ------------------------------------------------------------------ tray --
@@ -193,7 +294,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&status, &PredefinedMenuItem::separator(app)?, &toggle, &show, &PredefinedMenuItem::separator(app)?, &quit],
+        &[
+            &status,
+            &PredefinedMenuItem::separator(app)?,
+            &toggle,
+            &show,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
     )?;
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("Tunnel")
@@ -207,7 +315,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
                 tauri::async_runtime::spawn(async move {
                     let daemon = app.state::<Daemon>();
                     let Ok(d) = daemon.get().await else { return };
-                    let status: Option<Status> = d.get_status().await.ok().and_then(|s| serde_json::from_str(&s).ok());
+                    let status: Option<Status> = d
+                        .get_status()
+                        .await
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok());
                     match status {
                         Some(s) if s.state != ConnState::Disconnected => {
                             let _ = d.disconnect().await;
@@ -220,7 +332,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
                 show_main(tray.app_handle());
             }
         });
@@ -232,11 +349,15 @@ fn build_tray(app: &AppHandle) -> tauri::Result<Tray> {
 }
 
 fn update_tray(app: &AppHandle, s: &Status, profile_name: Option<&str>) {
-    let Some(tray) = app.try_state::<Tray>() else { return };
+    let Some(tray) = app.try_state::<Tray>() else {
+        return;
+    };
     let name = profile_name.unwrap_or("VPN");
     let (text, action) = match s.state {
         ConnState::Connected => (format!("Connected · {name}"), "Disconnect"),
-        ConnState::Connecting | ConnState::NeedsCredentials => (format!("Connecting · {name}"), "Cancel"),
+        ConnState::Connecting | ConnState::NeedsCredentials => {
+            (format!("Connecting · {name}"), "Cancel")
+        }
         ConnState::Disconnecting => ("Disconnecting…".to_string(), "Disconnect"),
         ConnState::Disconnected => ("Not connected".to_string(), "Connect…"),
     };
@@ -300,7 +421,14 @@ async fn pump_events(app: AppHandle) {
         if let Err(e) = result {
             if last_reachable != Some(false) {
                 last_reachable = Some(false);
-                let _ = app.emit("tunnel://daemon", DaemonInfo { bus: bus_name(), reachable: false, error: Some(e) });
+                let _ = app.emit(
+                    "tunnel://daemon",
+                    DaemonInfo {
+                        bus: bus_name(),
+                        reachable: false,
+                        error: Some(e),
+                    },
+                );
                 update_tray(&app, &Status::default(), None);
             }
             // A dropped bus connection needs a fresh proxy.
@@ -311,7 +439,11 @@ async fn pump_events(app: AppHandle) {
 }
 
 fn bus_name() -> &'static str {
-    if use_session_bus() { "session" } else { "system" }
+    if use_session_bus() {
+        "session"
+    } else {
+        "system"
+    }
 }
 
 async fn profile_names(d: &DaemonProxy<'_>) -> std::collections::HashMap<String, String> {
@@ -325,10 +457,18 @@ async fn profile_names(d: &DaemonProxy<'_>) -> std::collections::HashMap<String,
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app)
+        }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(Daemon::default())
+        .manage(Updates::default())
         .invoke_handler(tauri::generate_handler![
+            versions,
+            check_update,
+            install_update,
+            restart_app,
             daemon_info,
             list_profiles,
             import_profiles,

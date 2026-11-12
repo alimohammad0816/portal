@@ -61,10 +61,30 @@ enum Cmd {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let conn = if cli.session { zbus::Connection::session().await? } else { zbus::Connection::system().await? };
-    let d = DaemonProxy::new(&conn).await.context("connecting to tunneld")?;
+async fn main() -> std::process::ExitCode {
+    match run(Cli::parse()).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // `{:#}` joins the context chain; drop D-Bus error names, which
+            // mean nothing to a person reading the message.
+            let msg = format!("{e:#}")
+                .replace("org.freedesktop.DBus.Error.Failed: ", "")
+                .replace("org.freedesktop.DBus.Error.ServiceUnknown: ", "");
+            eprintln!("tunnel: {msg}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
+    let conn = if cli.session {
+        zbus::Connection::session().await?
+    } else {
+        zbus::Connection::system().await?
+    };
+    let d = DaemonProxy::new(&conn)
+        .await
+        .context("connecting to tunneld")?;
 
     match cli.cmd {
         Cmd::Import { files } => {
@@ -72,8 +92,17 @@ async fn main() -> Result<()> {
                 bail!("give at least one .ovpn file");
             }
             for f in files {
-                let p = import(&d, &f).await.with_context(|| format!("importing {}", f.display()))?;
-                println!("imported {}  {}  {}:{}/{}", short(&p.id), p.name, p.remote_host, p.remote_port, p.proto);
+                let p = import(&d, &f)
+                    .await
+                    .with_context(|| format!("importing {}", f.display()))?;
+                println!(
+                    "imported {}  {}  {}:{}/{}",
+                    short(&p.id),
+                    p.name,
+                    p.remote_host,
+                    p.remote_port,
+                    p.proto
+                );
             }
         }
         Cmd::List => {
@@ -107,7 +136,9 @@ async fn main() -> Result<()> {
                         println!("connected  {}", s.tunnel_ip.unwrap_or_default());
                         break;
                     }
-                    ConnState::Disconnected => bail!(s.error.unwrap_or_else(|| "disconnected".into())),
+                    ConnState::Disconnected => {
+                        bail!(s.error.unwrap_or_else(|| "disconnected".into()))
+                    }
                     _ => {}
                 }
             }
@@ -122,7 +153,12 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Edit { profile, name, group, country } => {
+        Cmd::Edit {
+            profile,
+            name,
+            group,
+            country,
+        } => {
             let p = find(&d, &profile).await?;
             let u: Profile = serde_json::from_str(
                 &d.update_profile(
@@ -141,7 +177,11 @@ async fn main() -> Result<()> {
             println!("removed {}", p.name);
         }
         Cmd::Log { follow } => {
-            let mut stream = if follow { Some(d.receive_log_line().await?) } else { None };
+            let mut stream = if follow {
+                Some(d.receive_log_line().await?)
+            } else {
+                None
+            };
             for line in d.get_log().await? {
                 println!("{line}");
             }
@@ -163,8 +203,13 @@ async fn import(d: &DaemonProxy<'_>, path: &PathBuf) -> Result<Profile> {
     let text = std::fs::read_to_string(path)?;
     let base = path.parent().map(PathBuf::from).unwrap_or_default();
     let inlined = ovpn::inline_files(&text, &base)?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("profile.ovpn");
-    Ok(serde_json::from_str(&d.import_profile(name, &inlined).await?)?)
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("profile.ovpn");
+    Ok(serde_json::from_str(
+        &d.import_profile(name, &inlined).await?,
+    )?)
 }
 
 async fn profiles(d: &DaemonProxy<'_>) -> Result<Vec<Profile>> {
@@ -174,14 +219,27 @@ async fn profiles(d: &DaemonProxy<'_>) -> Result<Vec<Profile>> {
 async fn find(d: &DaemonProxy<'_>, query: &str) -> Result<Profile> {
     let all = profiles(d).await?;
     let q = query.to_lowercase();
-    let mut hits: Vec<Profile> = all
-        .into_iter()
-        .filter(|p| p.id.starts_with(&q) || p.name.to_lowercase() == q)
-        .collect();
+    // Exact name or id prefix first, then names that start with the query,
+    // then names that contain it.
+    let tiers: [&dyn Fn(&Profile) -> bool; 3] = [
+        &|p| p.id.starts_with(&q) || p.name.to_lowercase() == q,
+        &|p| p.name.to_lowercase().starts_with(&q),
+        &|p| p.name.to_lowercase().contains(&q),
+    ];
+    let mut hits: Vec<Profile> = Vec::new();
+    for tier in tiers {
+        hits = all.iter().filter(|p| tier(p)).cloned().collect();
+        if !hits.is_empty() {
+            break;
+        }
+    }
     match hits.len() {
         0 => bail!("no profile matches `{query}`"),
         1 => Ok(hits.remove(0)),
-        _ => bail!("`{query}` matches {} profiles; use more of the id", hits.len()),
+        _ => bail!(
+            "`{query}` matches {} profiles; use more of the id",
+            hits.len()
+        ),
     }
 }
 
@@ -201,7 +259,10 @@ fn credentials(p: &Profile, username: Option<String>) -> Result<(String, String,
     };
     let pass = rpassword::prompt_password("Password: ")?;
     let resp = if p.auth == AuthKind::UserPassChallenge {
-        rpassword::prompt_password(format!("{}: ", p.challenge.as_deref().unwrap_or("Response")))?
+        rpassword::prompt_password(format!(
+            "{}: ",
+            p.challenge.as_deref().unwrap_or("Response")
+        ))?
     } else {
         String::new()
     };
@@ -216,12 +277,20 @@ fn human(bytes: u64) -> String {
         v /= 1000.0;
         i += 1;
     }
-    if i == 0 { format!("{bytes} B") } else { format!("{v:.1} {}", UNITS[i]) }
+    if i == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
 }
 
 async fn print_status(d: &DaemonProxy<'_>, s: &Status) -> Result<()> {
     let name = match &s.profile_id {
-        Some(id) => profiles(d).await?.into_iter().find(|p| &p.id == id).map(|p| p.name),
+        Some(id) => profiles(d)
+            .await?
+            .into_iter()
+            .find(|p| &p.id == id)
+            .map(|p| p.name),
         None => None,
     };
     let state = format!("{:?}", s.state).to_lowercase();
@@ -236,7 +305,11 @@ async fn print_status(d: &DaemonProxy<'_>, s: &Status) -> Result<()> {
             human(s.bytes_out)
         ),
         _ => {
-            let detail = s.detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default();
+            let detail = s
+                .detail
+                .as_deref()
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default();
             println!("{state}{detail}  {}", name.unwrap_or_default());
             if let Some(e) = &s.error {
                 println!("error: {e}");

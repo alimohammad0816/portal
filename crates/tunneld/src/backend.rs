@@ -17,9 +17,16 @@ use tracing::{debug, warn};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// OpenVPN state change (`>STATE:`).
-    State { name: String, tunnel_ip: Option<String>, server_ip: Option<String> },
+    State {
+        name: String,
+        tunnel_ip: Option<String>,
+        server_ip: Option<String>,
+    },
     /// Cumulative byte counters (`>BYTECOUNT:`).
-    Bytes { rx: u64, tx: u64 },
+    Bytes {
+        rx: u64,
+        tx: u64,
+    },
     Log(String),
     /// Something went wrong; the session is about to end.
     Fatal(String),
@@ -53,7 +60,13 @@ impl SessionHandle {
 pub type EventTx = mpsc::UnboundedSender<(u64, Event)>;
 
 pub trait Backend: Send + Sync {
-    fn start(&self, seq: u64, config: PathBuf, creds: Credentials, events: EventTx) -> Result<SessionHandle>;
+    fn start(
+        &self,
+        seq: u64,
+        config: PathBuf,
+        creds: Credentials,
+        events: EventTx,
+    ) -> Result<SessionHandle>;
 }
 
 // ---------------------------------------------------------------- OpenVPN --
@@ -64,7 +77,13 @@ pub struct OpenVpn {
 }
 
 impl Backend for OpenVpn {
-    fn start(&self, seq: u64, config: PathBuf, creds: Credentials, events: EventTx) -> Result<SessionHandle> {
+    fn start(
+        &self,
+        seq: u64,
+        config: PathBuf,
+        creds: Credentials,
+        events: EventTx,
+    ) -> Result<SessionHandle> {
         std::fs::create_dir_all(&self.runtime_dir)
             .with_context(|| format!("creating {}", self.runtime_dir.display()))?;
         let socket = self.runtime_dir.join(format!("mgmt-{seq}.sock"));
@@ -116,17 +135,25 @@ impl Backend for OpenVpn {
             let _ = done_tx.send(());
         });
 
-        Ok(SessionHandle { stop: Some(stop_tx), done: done_rx })
+        Ok(SessionHandle {
+            stop: Some(stop_tx),
+            done: done_rx,
+        })
     }
 }
 
-async fn connect_socket(path: &std::path::Path, child: &mut tokio::process::Child) -> Result<UnixStream> {
+async fn connect_socket(
+    path: &std::path::Path,
+    child: &mut tokio::process::Child,
+) -> Result<UnixStream> {
     for _ in 0..100 {
         if let Ok(s) = UnixStream::connect(path).await {
             return Ok(s);
         }
         if let Some(status) = child.try_wait()? {
-            anyhow::bail!("OpenVPN exited before it was ready ({status}). Check the log for details.");
+            anyhow::bail!(
+                "OpenVPN exited before it was ready ({status}). Check the log for details."
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -183,12 +210,21 @@ fn handle_line(line: &str, creds: &Credentials, seq: u64, events: &EventTx) -> R
             let f: Vec<&str> = body.split(',').collect();
             let opt = |i: usize| f.get(i).filter(|s| !s.is_empty()).map(|s| s.to_string());
             if let Some(name) = f.get(1) {
-                send(Event::State { name: name.to_string(), tunnel_ip: opt(3), server_ip: opt(4) });
+                send(Event::State {
+                    name: name.to_string(),
+                    tunnel_ip: opt(3),
+                    server_ip: opt(4),
+                });
             }
         }
         "BYTECOUNT" => {
-            let mut it = body.split(',').map(|s| s.trim().parse::<u64>().unwrap_or(0));
-            send(Event::Bytes { rx: it.next().unwrap_or(0), tx: it.next().unwrap_or(0) });
+            let mut it = body
+                .split(',')
+                .map(|s| s.trim().parse::<u64>().unwrap_or(0));
+            send(Event::Bytes {
+                rx: it.next().unwrap_or(0),
+                tx: it.next().unwrap_or(0),
+            });
         }
         "LOG" => {
             let msg = body.splitn(3, ',').nth(2).unwrap_or(body);
@@ -204,14 +240,22 @@ fn handle_line(line: &str, creds: &Credentials, seq: u64, events: &EventTx) -> R
 
 fn password_reply(body: &str, creds: &Credentials, send: &dyn Fn(Event)) -> Vec<String> {
     if body.starts_with("Verification Failed") {
-        send(Event::Fatal("Authentication failed. Check your username and password.".into()));
+        send(Event::Fatal(
+            "Authentication failed. Check your username and password.".into(),
+        ));
         return vec!["signal SIGTERM\n".into()];
     }
-    let Some(kind) = body.split('\'').nth(1) else { return vec![] };
+    let Some(kind) = body.split('\'').nth(1) else {
+        return vec![];
+    };
     if kind == "Auth" {
         let password = match &creds.response {
             Some(resp) if body.contains("SC:") => {
-                format!("SCRV1:{}:{}", base64(creds.password.as_bytes()), base64(resp.as_bytes()))
+                format!(
+                    "SCRV1:{}:{}",
+                    base64(creds.password.as_bytes()),
+                    base64(resp.as_bytes())
+                )
             }
             _ => creds.password.clone(),
         };
@@ -220,7 +264,9 @@ fn password_reply(body: &str, creds: &Credentials, send: &dyn Fn(Event)) -> Vec<
             format!("password \"Auth\" {}\n", quote(&password)),
         ]
     } else {
-        send(Event::Fatal(format!("This profile needs a '{kind}' password, which isn't supported yet.")));
+        send(Event::Fatal(format!(
+            "This profile needs a '{kind}' password, which isn't supported yet."
+        )));
         vec!["signal SIGTERM\n".into()]
     }
 }
@@ -247,7 +293,11 @@ fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         for i in 0..4 {
             if i <= chunk.len() {
@@ -266,7 +316,13 @@ fn base64(data: &[u8]) -> String {
 pub struct Mock;
 
 impl Backend for Mock {
-    fn start(&self, seq: u64, _config: PathBuf, _creds: Credentials, events: EventTx) -> Result<SessionHandle> {
+    fn start(
+        &self,
+        seq: u64,
+        _config: PathBuf,
+        _creds: Credentials,
+        events: EventTx,
+    ) -> Result<SessionHandle> {
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let (done_tx, done_rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -275,7 +331,11 @@ impl Backend for Mock {
             };
             let steps = ["RESOLVE", "WAIT", "AUTH", "GET_CONFIG", "ASSIGN_IP"];
             for name in steps {
-                send(Event::State { name: name.into(), tunnel_ip: None, server_ip: None });
+                send(Event::State {
+                    name: name.into(),
+                    tunnel_ip: None,
+                    server_ip: None,
+                });
                 send(Event::Log(format!("MOCK: {name}")));
                 tokio::select! {
                     _ = &mut stop_rx => { send(Event::Exited); let _ = done_tx.send(()); return; }
@@ -301,12 +361,19 @@ impl Backend for Mock {
                     }
                 }
             }
-            send(Event::State { name: "EXITING".into(), tunnel_ip: None, server_ip: None });
+            send(Event::State {
+                name: "EXITING".into(),
+                tunnel_ip: None,
+                server_ip: None,
+            });
             tokio::time::sleep(Duration::from_millis(200)).await;
             send(Event::Exited);
             let _ = done_tx.send(());
         });
-        Ok(SessionHandle { stop: Some(stop_tx), done: done_rx })
+        Ok(SessionHandle {
+            stop: Some(stop_tx),
+            done: done_rx,
+        })
     }
 }
 
@@ -328,7 +395,10 @@ mod tests {
 
     #[test]
     fn parses_state_lines() {
-        let (_, ev) = collect(">STATE:1700000000,CONNECTED,SUCCESS,10.8.0.6,203.0.113.1,1194,,", &Credentials::default());
+        let (_, ev) = collect(
+            ">STATE:1700000000,CONNECTED,SUCCESS,10.8.0.6,203.0.113.1,1194,,",
+            &Credentials::default(),
+        );
         assert_eq!(
             ev,
             vec![Event::State {
@@ -343,27 +413,56 @@ mod tests {
     fn parses_bytecount_and_log() {
         let (_, ev) = collect(">BYTECOUNT:1024,2048", &Credentials::default());
         assert_eq!(ev, vec![Event::Bytes { rx: 1024, tx: 2048 }]);
-        let (_, ev) = collect(">LOG:1700000000,I,Peer Connection Initiated, with x", &Credentials::default());
-        assert_eq!(ev, vec![Event::Log("Peer Connection Initiated, with x".into())]);
+        let (_, ev) = collect(
+            ">LOG:1700000000,I,Peer Connection Initiated, with x",
+            &Credentials::default(),
+        );
+        assert_eq!(
+            ev,
+            vec![Event::Log("Peer Connection Initiated, with x".into())]
+        );
     }
 
     #[test]
     fn answers_password_prompts() {
-        let creds = Credentials { username: "ali".into(), password: "p\"w\\d".into(), response: None };
+        let creds = Credentials {
+            username: "ali".into(),
+            password: "p\"w\\d".into(),
+            response: None,
+        };
         let (replies, _) = collect(">PASSWORD:Need 'Auth' username/password", &creds);
-        assert_eq!(replies, vec!["username \"Auth\" \"ali\"\n", "password \"Auth\" \"p\\\"w\\\\d\"\n"]);
+        assert_eq!(
+            replies,
+            vec![
+                "username \"Auth\" \"ali\"\n",
+                "password \"Auth\" \"p\\\"w\\\\d\"\n"
+            ]
+        );
     }
 
     #[test]
     fn answers_static_challenge() {
-        let creds = Credentials { username: "u".into(), password: "pass".into(), response: Some("123456".into()) };
-        let (replies, _) = collect(">PASSWORD:Need 'Auth' username/password SC:1,Enter OTP", &creds);
-        assert_eq!(replies[1], "password \"Auth\" \"SCRV1:cGFzcw==:MTIzNDU2\"\n");
+        let creds = Credentials {
+            username: "u".into(),
+            password: "pass".into(),
+            response: Some("123456".into()),
+        };
+        let (replies, _) = collect(
+            ">PASSWORD:Need 'Auth' username/password SC:1,Enter OTP",
+            &creds,
+        );
+        assert_eq!(
+            replies[1],
+            "password \"Auth\" \"SCRV1:cGFzcw==:MTIzNDU2\"\n"
+        );
     }
 
     #[test]
     fn reports_auth_failure() {
-        let (replies, ev) = collect(">PASSWORD:Verification Failed: 'Auth'", &Credentials::default());
+        let (replies, ev) = collect(
+            ">PASSWORD:Verification Failed: 'Auth'",
+            &Credentials::default(),
+        );
         assert_eq!(replies, vec!["signal SIGTERM\n"]);
         assert!(matches!(&ev[0], Event::Fatal(m) if m.contains("Authentication failed")));
     }

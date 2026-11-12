@@ -1,0 +1,209 @@
+//! Update checks against GitHub Releases. Downloads happen here, as the
+//! user; the daemon verifies the signature and installs (see
+//! `tunneld::update`).
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use tunnel_core::names::UPDATE_REPO;
+
+const USER_AGENT: &str = concat!("Tunnel/", env!("CARGO_PKG_VERSION"), " (update check)");
+
+#[derive(Serialize, Clone)]
+pub struct UpdateInfo {
+    /// Version of this app build.
+    pub current: String,
+    /// False when this build has no release repository compiled in.
+    pub enabled: bool,
+    /// Present when a newer release exists.
+    pub available: Option<Release>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct Release {
+    pub version: String,
+    pub notes: String,
+    pub url: String,
+    pub published_at: String,
+    #[serde(skip)]
+    pub deb_url: String,
+    #[serde(skip)]
+    pub sig_url: String,
+}
+
+#[derive(Deserialize)]
+struct GhRelease {
+    tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
+    html_url: String,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    assets: Vec<GhAsset>,
+}
+
+#[derive(Deserialize)]
+struct GhAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+fn client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// `1.2.10` > `1.2.9`; pre-release suffixes are ignored.
+pub fn is_newer(candidate: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split(['-', '+'])
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let (a, b) = (parse(candidate), parse(current));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+fn arch_suffix() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "_arm64.deb",
+        _ => "_amd64.deb",
+    }
+}
+
+pub async fn check() -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let Some(repo) = UPDATE_REPO else {
+        return Ok(UpdateInfo {
+            current,
+            enabled: false,
+            available: None,
+        });
+    };
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let resp = client()?
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Couldn't check for updates: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(UpdateInfo {
+            current,
+            enabled: true,
+            available: None,
+        });
+    }
+    let rel: GhRelease = resp
+        .error_for_status()
+        .map_err(|e| format!("Couldn't check for updates: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Unexpected reply from GitHub: {e}"))?;
+    if rel.draft || rel.prerelease || !is_newer(&rel.tag_name, &current) {
+        return Ok(UpdateInfo {
+            current,
+            enabled: true,
+            available: None,
+        });
+    }
+    let deb = rel.assets.iter().find(|a| a.name.ends_with(arch_suffix()));
+    let sig = deb.and_then(|d| {
+        rel.assets
+            .iter()
+            .find(|a| a.name == format!("{}.minisig", d.name))
+    });
+    let (Some(deb), Some(sig)) = (deb, sig) else {
+        // A release without a package for this machine isn't installable.
+        return Ok(UpdateInfo {
+            current,
+            enabled: true,
+            available: None,
+        });
+    };
+    Ok(UpdateInfo {
+        current,
+        enabled: true,
+        available: Some(Release {
+            version: rel.tag_name.trim_start_matches('v').to_string(),
+            notes: rel.body.unwrap_or_default(),
+            url: rel.html_url,
+            published_at: rel.published_at.unwrap_or_default(),
+            deb_url: deb.browser_download_url.clone(),
+            sig_url: sig.browser_download_url.clone(),
+        }),
+    })
+}
+
+/// Download the package and its signature into the user's cache.
+pub async fn download(rel: &Release) -> Result<(PathBuf, String), String> {
+    let http = client()?;
+    let sig = http
+        .get(&rel.sig_url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Downloading the signature failed: {e}"))?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    let bytes = http
+        .get(&rel.deb_url)
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Downloading the update failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Downloading the update failed: {e}"))?;
+
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("tunnel");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let path = dir.join(format!("tunnel_{}.deb", rel.version));
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((path, sig))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    #[test]
+    fn compares_versions() {
+        assert!(is_newer("v0.2.0", "0.1.9"));
+        assert!(is_newer("0.10.0", "0.9.3"));
+        assert!(is_newer("1.0.0", "0.99.99"));
+        assert!(!is_newer("0.1.0", "0.1.0"));
+        assert!(!is_newer("v0.1.0-rc1", "0.1.0"));
+        assert!(!is_newer("0.0.9", "0.1.0"));
+    }
+}

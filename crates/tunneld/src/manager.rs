@@ -105,7 +105,11 @@ impl Manager {
 
     /// First half of connecting: validate, take the old session out so the
     /// caller can stop it without holding the lock, and show "connecting".
-    pub fn begin_connect(&mut self, id: &str, creds: &Credentials) -> Result<Option<SessionHandle>> {
+    pub fn begin_connect(
+        &mut self,
+        id: &str,
+        creds: &Credentials,
+    ) -> Result<Option<SessionHandle>> {
         if self.store.get(id).is_none() {
             bail!("No profile with id {id}.");
         }
@@ -128,11 +132,19 @@ impl Manager {
     /// Second half: start the new session (unless another connect or a
     /// disconnect happened while the old one was stopping).
     pub fn finish_connect(&mut self, id: &str, creds: Credentials) -> Result<()> {
-        if self.status.profile_id.as_deref() != Some(id) || self.status.state != ConnState::Connecting {
+        if self.status.profile_id.as_deref() != Some(id)
+            || self.status.state != ConnState::Connecting
+        {
             return Ok(());
         }
-        let config = self.store.config_path(id).ok_or_else(|| anyhow!("profile disappeared"))?;
-        match self.backend.start(self.seq, config, creds, self.events.clone()) {
+        let config = self
+            .store
+            .config_path(id)
+            .ok_or_else(|| anyhow!("profile disappeared"))?;
+        match self
+            .backend
+            .start(self.seq, config, creds, self.events.clone())
+        {
             Ok(handle) => {
                 self.session = Some(handle);
                 Ok(())
@@ -162,7 +174,11 @@ impl Manager {
             return;
         }
         match event {
-            Event::State { name, tunnel_ip, server_ip } => {
+            Event::State {
+                name,
+                tunnel_ip,
+                server_ip,
+            } => {
                 match name.as_str() {
                     "CONNECTED" => {
                         self.status.state = ConnState::Connected;
@@ -203,7 +219,9 @@ impl Manager {
             Event::Exited => {
                 self.session = None;
                 let error = self.status.error.take().or_else(|| {
-                    (!self.user_stopped).then(|| "The connection ended unexpectedly. See the log for details.".into())
+                    (!self.user_stopped).then(|| {
+                        "The connection ended unexpectedly. See the log for details.".into()
+                    })
                 });
                 self.status = Status {
                     state: ConnState::Disconnected,
@@ -237,7 +255,12 @@ mod tests {
 
     const CFG: &str = "client\nremote de-fra-02.example.net 1194\n";
 
-    async fn setup() -> (Shared, mpsc::UnboundedReceiver<Notice>, String, tempfile::TempDir) {
+    async fn setup() -> (
+        Shared,
+        mpsc::UnboundedReceiver<Notice>,
+        String,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ProfileStore::open(dir.path().to_path_buf()).unwrap();
         let id = store.import("de.ovpn", CFG).unwrap().id;
@@ -247,7 +270,10 @@ mod tests {
 
     async fn wait_for(rx: &mut mpsc::UnboundedReceiver<Notice>, state: ConnState) -> Status {
         loop {
-            let n = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+            let n = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
             if let Notice::Status(s) = n
                 && s.state == state
             {
@@ -259,9 +285,16 @@ mod tests {
     #[tokio::test]
     async fn connects_and_disconnects() {
         let (mgr, mut rx, id, _dir) = setup().await;
-        let old = mgr.lock().await.begin_connect(&id, &Credentials::default()).unwrap();
+        let old = mgr
+            .lock()
+            .await
+            .begin_connect(&id, &Credentials::default())
+            .unwrap();
         assert!(old.is_none());
-        mgr.lock().await.finish_connect(&id, Credentials::default()).unwrap();
+        mgr.lock()
+            .await
+            .finish_connect(&id, Credentials::default())
+            .unwrap();
         let s = wait_for(&mut rx, ConnState::Connected).await;
         assert_eq!(s.tunnel_ip.as_deref(), Some("10.8.0.6"));
         assert!(mgr.lock().await.profiles()[0].last_connected_at.is_some());
@@ -276,10 +309,15 @@ mod tests {
     async fn requires_credentials_for_user_pass_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ProfileStore::open(dir.path().to_path_buf()).unwrap();
-        let id = store.import("x.ovpn", "client\nremote a.example\nauth-user-pass\n").unwrap().id;
+        let id = store
+            .import("x.ovpn", "client\nremote a.example\nauth-user-pass\n")
+            .unwrap()
+            .id;
         let (tx, _rx) = mpsc::unbounded_channel();
         let mgr = Manager::spawn(store, Arc::new(Mock), tx);
-        let err = mgr.lock().await.begin_connect(&id, &Credentials::default()).unwrap_err();
+        let Err(err) = mgr.lock().await.begin_connect(&id, &Credentials::default()) else {
+            panic!("connect without credentials should fail");
+        };
         assert!(err.to_string().contains("username"));
     }
 
@@ -289,7 +327,8 @@ mod tests {
         {
             let mut m = mgr.lock().await;
             m.begin_connect(&id, &Credentials::default()).unwrap();
-            m.on_event(m.seq - 1, Event::Exited);
+            let stale = m.seq - 1;
+            m.on_event(stale, Event::Exited);
             assert_eq!(m.status().state, ConnState::Connecting);
         }
     }

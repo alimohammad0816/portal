@@ -128,6 +128,25 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
       if (host.startsWith("us-")) return null;
       return 40 + ((host.length * 37) % 140);
     }
+    case "versions":
+      return { app: "0.1.0", daemon: "0.1.0" };
+    case "check_update":
+      return {
+        current: "0.1.0",
+        enabled: true,
+        available: {
+          version: "0.2.0",
+          notes: "- Kill switch\n- DNS leak protection",
+          url: "https://github.com/",
+          published_at: new Date().toISOString(),
+        },
+      };
+    case "install_update":
+      await new Promise((r) => setTimeout(r, 1500));
+      return "0.2.0";
+    case "restart_app":
+      location.reload();
+      return null;
     default:
       throw `unknown command ${cmd}`;
   }

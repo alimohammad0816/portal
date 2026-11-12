@@ -89,6 +89,41 @@ tunnel import ~/Downloads/de-fra.ovpn
 tunnel connect de-fra
 ```
 
+## Install
+
+Download `tunnel_X.Y.Z_amd64.deb` from the latest release, then:
+
+```bash
+sudo apt install ./tunnel_X.Y.Z_amd64.deb
+```
+
+The package contains the app, the `tunnel` CLI and the `tunneld` service,
+which starts right away. `sudo apt purge tunnel` removes everything,
+including saved profiles.
+
+## Releases and updates
+
+`.github/workflows/release.yml` runs on every `v*` tag: it tests, builds the
+`.deb`, signs it with minisign, and publishes it with `SHA256SUMS` as a
+GitHub release. The app checks the latest release every few hours (it can
+be turned off under Settings › About), shows an **Update** button, downloads
+the package as the user, and passes it to `tunneld`. The service installs it
+only when it is signed with the release key in
+`packaging/update-key.pub`, is named `tunnel`, and is newer than what's
+installed. The install runs in its own systemd unit, so it survives the
+service restarting itself.
+
+To publish a version:
+
+```bash
+scripts/release.sh 0.2.0
+```
+
+One-time setup: add the contents of the minisign secret key
+(`~/.config/tunnel-release/minisign.key`) as a repository secret named
+`MINISIGN_SECRET_KEY`. Keep that file safe: losing it means installed apps
+can't verify new releases, and anyone who has it can ship updates.
+
 ## Roadmap
 
 1. **Now:** import, connect/disconnect, location list with latency, live
