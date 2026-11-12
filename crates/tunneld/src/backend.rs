@@ -99,6 +99,11 @@ impl SessionHandle {
 
 pub type EventTx = mpsc::UnboundedSender<(u64, Event)>;
 
+/// How long OpenVPN gets to act on a management `signal SIGTERM`.
+const STOP_GRACE: Duration = Duration::from_secs(3);
+/// And then on a real SIGTERM, before it's killed.
+const KILL_GRACE: Duration = Duration::from_secs(2);
+
 pub trait Backend: Send + Sync {
     fn start(
         &self,
@@ -229,11 +234,25 @@ impl Backend for OpenVpn {
                 let _ = events.send((seq, Event::Fatal(format!("{e:#}"))));
             }
             // Give OpenVPN a moment to tear down routes, then make sure it's gone.
-            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(Ok(status)) => debug!("session {seq}: openvpn exited with {status}"),
+            let clean = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                Ok(Ok(status)) => {
+                    debug!("session {seq}: openvpn exited with {status}");
+                    status.code().is_some()
+                }
                 _ => {
                     let _ = child.kill().await;
+                    false
                 }
+            };
+            // Killed: it couldn't remove its tunnel device (and the routes
+            // through it). A DCO device outlives the process otherwise.
+            if !clean {
+                let _ = Command::new("ip")
+                    .args(["link", "delete", TUNNEL_IFACE])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await;
             }
             let _ = std::fs::remove_file(&socket);
             let _ = events.send((seq, Event::Exited));
@@ -283,12 +302,34 @@ async fn run_management(
         wr.write_all(format!("{cmd}\n").as_bytes()).await?;
     }
 
+    // OpenVPN reads management commands between its own steps, so a stop
+    // can wait behind a blocking one (a DNS lookup takes up to 20 s). Ask
+    // nicely, then signal the process, then kill it.
     let mut stopping = false;
+    let mut escalation = 0;
+    let deadline = tokio::time::sleep(Duration::from_secs(86_400));
+    tokio::pin!(deadline);
     loop {
         tokio::select! {
             _ = &mut stop, if !stopping => {
                 stopping = true;
                 wr.write_all(b"signal SIGTERM\n").await?;
+                deadline.as_mut().reset(tokio::time::Instant::now() + STOP_GRACE);
+            }
+            _ = &mut deadline, if stopping => {
+                escalation += 1;
+                if escalation == 1 {
+                    warn!("session {seq}: OpenVPN didn't stop; sending SIGTERM");
+                    if let Some(pid) = child.id() {
+                        // SAFETY: plain kill(2) on our own child's pid.
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                    }
+                    deadline.as_mut().reset(tokio::time::Instant::now() + KILL_GRACE);
+                } else {
+                    warn!("session {seq}: OpenVPN still running; killing it");
+                    let _ = child.start_kill();
+                    return Ok(());
+                }
             }
             Some(cmd) = input.recv() => {
                 wr.write_all(cmd.as_bytes()).await?;
@@ -851,6 +892,47 @@ mod tests {
             Event::NeedsInput { request, live: true, .. }
                 if request.message.as_deref() == Some("Enter the code") && !request.echo
         ));
+    }
+
+    /// A stand-in for OpenVPN stuck in a blocking call: it opens the
+    /// management socket, then ignores the stop command and SIGTERM.
+    #[tokio::test]
+    async fn stop_kills_an_unresponsive_openvpn() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("openvpn");
+        std::fs::write(
+            &fake,
+            "#!/usr/bin/env python3\n\
+             import signal, socket, sys, time\n\
+             signal.signal(signal.SIGTERM, signal.SIG_IGN)\n\
+             if '--help' in sys.argv: sys.exit(0)\n\
+             path = sys.argv[sys.argv.index('--management') + 1]\n\
+             s = socket.socket(socket.AF_UNIX); s.bind(path); s.listen(1)\n\
+             c, _ = s.accept()\n\
+             time.sleep(120)\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let backend = OpenVpn::new(fake, dir.path().join("run"));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let launch = Launch {
+            config: "client\nremote vpn.example 1194\n".into(),
+            ..Default::default()
+        };
+        let handle = backend
+            .start(1, launch, Credentials::default(), tx)
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let started = std::time::Instant::now();
+        handle.stop().await;
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(7), "stop took {took:?}");
+        let mut exited = false;
+        while let Ok(Some((_, e))) = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            exited |= e == Event::Exited;
+        }
+        assert!(exited, "no Exited event");
     }
 
     #[test]

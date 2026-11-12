@@ -10,6 +10,7 @@ rust-version.workspace = true
 tunnel-core.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+libc = "0.2"
 minisign-verify = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 socket2 = { version = "0.6", features = ["all"] }
