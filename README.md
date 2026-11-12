@@ -275,3 +275,10 @@ gnome-extensions enable portal@alimohammad0816.github.io
    proxy gateway, GNOME quick settings tile.
 5. Done: key passphrases, dynamic and web sign-in, connection proxy,
    folder import, DCO and extra options per profile.
+
+## License
+
+Portal is free software, licensed under the
+[GNU General Public License v3.0 or later](LICENSE). You may use, study,
+share and modify it; if you distribute a modified version, its source code
+must be released under the same license.
