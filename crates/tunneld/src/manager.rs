@@ -19,6 +19,7 @@ use tunnel_core::{ConnState, DnsMode, FirewallMode, Profile, Settings, SplitMode
 use crate::backend::{Backend, Credentials, Event, EventTx, SessionHandle};
 use crate::dns::LinkDns;
 use crate::firewall::{self, Firewall, Plan};
+use crate::gateway::Gateway;
 use crate::profiles::{ProfileStore, write_private};
 use crate::split::{Link, Split, geoip};
 
@@ -75,6 +76,7 @@ pub struct Manager {
     geo: (Vec<String>, Vec<String>),
     /// The physical network's resolvers, learned when DNS was applied.
     direct_dns: Vec<IpAddr>,
+    gateway: Option<Gateway>,
 }
 
 pub type Shared = Arc<Mutex<Manager>>;
@@ -139,6 +141,7 @@ impl Manager {
             session_include: false,
             geo: (Vec::new(), Vec::new()),
             direct_dns: Vec::new(),
+            gateway: None,
         };
         mgr.sync_firewall();
         mgr.load_geo();
@@ -249,6 +252,42 @@ impl Manager {
             direct_dns: self.direct_dns.clone(),
         };
         self.split.start(&self.settings.split, &self.geo.1, &link)
+    }
+
+    /// Run the proxy gateway while connected, if it's on.
+    fn sync_gateway(&mut self) {
+        let want = self.settings.proxy_gateway.enabled && self.status.state == ConnState::Connected;
+        let port = self.settings.proxy_gateway.port;
+        let running_port = self.gateway.as_ref().map(|g| g.addr.port());
+        if want && running_port == Some(port) {
+            return;
+        }
+        if let Some(g) = self.gateway.take() {
+            g.stop();
+        }
+        self.status.proxy_address = None;
+        if !want {
+            return;
+        }
+        let Some(ip) = crate::gateway::lan_address(TUNNEL_IFACE) else {
+            self.push_log("Proxy gateway: no LAN address to listen on.".into());
+            return;
+        };
+        let mark = if self.split.mode() == Some(SplitMode::Include) {
+            crate::split::net::MARK_TUNNEL
+        } else {
+            0
+        };
+        match Gateway::start(ip, port, mark) {
+            Ok(g) => {
+                self.status.proxy_address = Some(g.addr.to_string());
+                self.gateway = Some(g);
+            }
+            Err(e) => {
+                warn!("proxy gateway: {e:#}");
+                self.push_log(format!("Proxy gateway couldn't start: {e:#}"));
+            }
+        }
     }
 
     fn split_failed(&mut self, e: anyhow::Error) {
@@ -392,6 +431,9 @@ impl Manager {
 
     /// Remove our rules unless they're meant to outlive us.
     pub fn shutdown(&mut self) {
+        if let Some(g) = self.gateway.take() {
+            g.stop();
+        }
         self.split.stop();
         if self.settings.firewall != FirewallMode::Always {
             self.firewall.clear();
@@ -425,6 +467,7 @@ impl Manager {
     }
 
     fn sync_firewall(&mut self) {
+        self.sync_gateway();
         let plan = self.plan();
         if let Err(e) = self.firewall.apply(&plan) {
             warn!("{e:#}");

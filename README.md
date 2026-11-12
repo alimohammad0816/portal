@@ -193,11 +193,34 @@ namespace:
 cargo test -p tunneld --no-run && unshare -rn target/debug/deps/tunneld-* --ignored --test-threads=1 netns
 ```
 
+## Everyday conveniences
+
+- **Saved passwords** live in your keyring (GNOME Keyring, KWallet, ...)
+  through the Secret Service API. The app hands them straight to the
+  service; they never reach the web view. A password the server rejects is
+  forgotten, so the next attempt asks again.
+- **Start at login, connect on start, connect on untrusted networks.**
+  Tunnel watches NetworkManager's primary connection; joining a network
+  that isn't on your trusted list connects the last (or chosen) location.
+  Profiles with one-time codes still ask.
+- **Exit location on the map**, from ipwho.is through the tunnel (can be
+  turned off).
+- **Proxy gateway**: one port on your LAN address speaking SOCKS5 and HTTP,
+  so phones and TVs can use the VPN. It only runs while connected and only
+  serves private addresses.
+- **GNOME quick settings tile** (`tunnel@tunnelvpn.org`, installed with the
+  package): status, recent locations, firewall and split toggles. Turn it
+  on in the Extensions app, or:
+
+```bash
+gnome-extensions enable tunnel@tunnelvpn.org
+```
+
 ## Roadmap
 
 1. Done: import, connect/disconnect, location list with latency, live
    status, tray, logs, signed updates.
 2. Done: kill switch, DNS leak protection, IPv6 leak blocking, allow-LAN.
 3. Done: split tunneling by app, domain, IP/network and country.
-4. Credentials in GNOME Keyring, trusted networks, proxy gateway, GNOME
-   Shell quick-settings tile, server geolocation.
+4. Done: saved passwords, start at login, trusted networks, exit location,
+   proxy gateway, GNOME quick settings tile.

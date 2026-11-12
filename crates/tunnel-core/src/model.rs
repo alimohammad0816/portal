@@ -102,6 +102,27 @@ pub struct Status {
     /// Processes currently split by app rules or `tunnel bypass`.
     #[serde(default)]
     pub split_processes: usize,
+    /// Where the proxy gateway listens (`192.168.1.50:1080`) while it runs.
+    #[serde(default)]
+    pub proxy_address: Option<String>,
+}
+
+/// Share the VPN with other devices on the LAN through a proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyGateway {
+    pub enabled: bool,
+    /// One port for both SOCKS5 and HTTP.
+    pub port: u16,
+}
+
+impl Default for ProxyGateway {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 1080,
+        }
+    }
 }
 
 /// When the kill switch blocks traffic outside the tunnel.
@@ -145,6 +166,7 @@ pub struct Settings {
     /// and 853 everywhere else.
     pub dns_leak_protection: bool,
     pub split: SplitSettings,
+    pub proxy_gateway: ProxyGateway,
 }
 
 /// Which side of the tunnel the listed traffic goes to.
@@ -188,6 +210,7 @@ impl Default for Settings {
             dns: DnsMode::Vpn,
             dns_leak_protection: true,
             split: SplitSettings::default(),
+            proxy_gateway: ProxyGateway::default(),
         }
     }
 }
@@ -195,6 +218,9 @@ impl Default for Settings {
 impl Settings {
     /// Check values that came from a client.
     pub fn validate(&self) -> Result<(), String> {
+        if self.proxy_gateway.port < 1024 {
+            return Err("Use a proxy port from 1024 up.".into());
+        }
         if self.split.apps.len() > 200
             || self.split.hosts.len() > 2000
             || self.split.countries.len() > 20

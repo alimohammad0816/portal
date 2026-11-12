@@ -46,7 +46,9 @@
           "/usr/lib/systemd/system/tunneld.service": "../../../packaging/systemd/tunneld.service",
           "/usr/share/dbus-1/system.d/org.tunnelvpn.Daemon1.conf": "../../../packaging/dbus/org.tunnelvpn.Daemon1.conf",
           "/usr/share/dbus-1/system-services/org.tunnelvpn.Daemon1.service": "../../../packaging/dbus/org.tunnelvpn.Daemon1.service",
-          "/usr/share/polkit-1/actions/org.tunnelvpn.policy": "../../../packaging/polkit/org.tunnelvpn.policy"
+          "/usr/share/polkit-1/actions/org.tunnelvpn.policy": "../../../packaging/polkit/org.tunnelvpn.policy",
+          "/usr/share/gnome-shell/extensions/tunnel@tunnelvpn.org/metadata.json": "../../../packaging/gnome-shell/tunnel@tunnelvpn.org/metadata.json",
+          "/usr/share/gnome-shell/extensions/tunnel@tunnelvpn.org/extension.js": "../../../packaging/gnome-shell/tunnel@tunnelvpn.org/extension.js"
         },
         "postInstallScript": "../../../packaging/deb/postinst",
         "preRemoveScript": "../../../packaging/deb/prerm",

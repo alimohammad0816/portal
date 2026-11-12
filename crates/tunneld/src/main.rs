@@ -5,6 +5,7 @@ mod backend;
 mod dbus;
 mod dns;
 mod firewall;
+mod gateway;
 mod manager;
 mod profiles;
 mod split;

@@ -389,6 +389,9 @@ async fn print_status(d: &DaemonProxy<'_>, s: &Status) -> Result<()> {
             }
         }
     }
+    if let Some(p) = &s.proxy_address {
+        println!("proxy gateway: {p}");
+    }
     Ok(())
 }
 
@@ -416,6 +419,10 @@ fn apply_change(st: &mut Settings, change: &str) -> Result<()> {
         "lan" => st.allow_lan = on_off(value)?,
         "ipv6" => st.block_ipv6 = on_off(value)?,
         "dns-guard" => st.dns_leak_protection = on_off(value)?,
+        "gateway" => st.proxy_gateway.enabled = on_off(value)?,
+        "gateway-port" => {
+            st.proxy_gateway.port = value.parse().context("gateway-port is a number")?
+        }
         "dns" => {
             st.dns = if value == "vpn" {
                 DnsMode::Vpn
@@ -423,7 +430,9 @@ fn apply_change(st: &mut Settings, change: &str) -> Result<()> {
                 DnsMode::Custom(value.split(',').map(|s| s.trim().to_string()).collect())
             }
         }
-        _ => bail!("unknown setting `{key}` (firewall, lan, ipv6, dns, dns-guard)"),
+        _ => bail!(
+            "unknown setting `{key}` (firewall, lan, ipv6, dns, dns-guard, gateway, gateway-port)"
+        ),
     }
     Ok(())
 }
@@ -450,6 +459,11 @@ fn print_settings(st: &Settings) {
     );
     println!("dns        {dns}");
     println!("dns-guard  {}", yn(st.dns_leak_protection));
+    println!(
+        "gateway    {}  (port {}, SOCKS5 and HTTP for the LAN)",
+        yn(st.proxy_gateway.enabled),
+        st.proxy_gateway.port
+    );
 }
 
 fn apply_split(sp: &mut SplitSettings, action: SplitCmd) -> Result<()> {

@@ -115,6 +115,73 @@ export function FirewallSettings({ settings, onChange }: { settings: Settings; o
   );
 }
 
+export function GatewaySettings({
+  settings,
+  status,
+  onChange,
+}: {
+  settings: Settings;
+  status: Status;
+  onChange: (s: Settings) => void;
+}) {
+  const gw = settings.proxy_gateway;
+  const [port, setPort] = useState(String(gw.port));
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => setPort(String(gw.port)), [gw.port]);
+
+  function savePort() {
+    const n = Number(port);
+    if (!Number.isInteger(n) || n < 1024 || n > 65535) {
+      setError("Use a port between 1024 and 65535.");
+      return;
+    }
+    setError(null);
+    onChange({ ...settings, proxy_gateway: { ...gw, port: n } });
+  }
+
+  return (
+    <div className="grid gap-3 rounded-xl border p-3">
+      <Toggle
+        id="gateway"
+        title="Proxy gateway"
+        description="Let phones and other devices on your network use the VPN through this computer (SOCKS5 or HTTP proxy)."
+        checked={gw.enabled}
+        onChange={(v) => onChange({ ...settings, proxy_gateway: { ...gw, enabled: v } })}
+      />
+      <div className="flex items-center gap-2">
+        <Label htmlFor="gateway-port" className="text-xs font-normal text-muted-foreground">
+          Port
+        </Label>
+        <Input
+          id="gateway-port"
+          inputMode="numeric"
+          value={port}
+          onChange={(e) => {
+            setPort(e.target.value);
+            setError(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && savePort()}
+          onBlur={savePort}
+          className="h-8 w-24 font-mono text-[13px]"
+        />
+        {error && <span className="text-xs text-destructive">{error}</span>}
+      </div>
+      {gw.enabled && (
+        <p className="text-xs leading-5 text-muted-foreground">
+          {status.proxy_address ? (
+            <>
+              Set the proxy on your devices to{" "}
+              <span className="selectable font-mono text-foreground">{status.proxy_address}</span>.
+            </>
+          ) : (
+            "Starts when the VPN connects."
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function DnsSettings({
   settings,
   status,

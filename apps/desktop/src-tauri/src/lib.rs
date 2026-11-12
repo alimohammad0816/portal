@@ -2,7 +2,10 @@
 //! icon, and keeps running in the tray when the window is closed.
 
 mod apps;
+mod keyring;
 mod latency;
+mod network;
+mod prefs;
 mod updater;
 
 use std::path::PathBuf;
@@ -176,19 +179,57 @@ async fn remove_profile(daemon: State<'_, Daemon>, id: String) -> Result<(), Str
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn connect(
     daemon: State<'_, Daemon>,
     id: String,
     username: String,
     password: String,
     response: String,
+    remember: Option<bool>,
+    name: Option<String>,
 ) -> Result<(), String> {
+    // No username: use the saved one, if any. The password goes from the
+    // keyring straight to the service, never through the web view.
+    let (username, password) = if username.is_empty() {
+        match keyring::load(&id).await {
+            Ok(Some(s)) => (s.username, s.password),
+            _ => (String::new(), String::new()),
+        }
+    } else {
+        match remember {
+            Some(true) => {
+                let saved = keyring::Saved {
+                    username: username.clone(),
+                    password: password.clone(),
+                };
+                if let Err(e) = keyring::save(&id, name.as_deref().unwrap_or(&id), &saved).await {
+                    eprintln!("keyring: {e}");
+                }
+            }
+            Some(false) => {
+                let _ = keyring::forget(&id).await;
+            }
+            None => {}
+        }
+        (username, password)
+    };
     daemon
         .get()
         .await?
         .connect(&id, &username, &password, &response)
         .await
         .map_err(err)
+}
+
+#[tauri::command]
+async fn has_credentials(id: String) -> bool {
+    keyring::has(&id).await
+}
+
+#[tauri::command]
+async fn forget_credentials(id: String) -> Result<(), String> {
+    keyring::forget(&id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -296,6 +337,165 @@ fn restart_app(app: AppHandle) {
 struct Tray {
     status: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
+}
+
+// ------------------------------------------------- automatic connections --
+
+#[derive(Serialize, Clone)]
+struct NeedsCredentials {
+    profile_id: String,
+}
+
+/// Connect without asking, if we can: certificate profiles, and password
+/// profiles with a saved password. Otherwise bring up the window and let it
+/// ask. Does nothing when already connected or connecting.
+async fn auto_connect(app: &AppHandle, profile: Option<String>, why: &str) {
+    let daemon = app.state::<Daemon>();
+    let Ok(d) = daemon.get().await else { return };
+    let Ok(status) = d.get_status().await.map_err(err).and_then(parse::<Status>) else {
+        return;
+    };
+    if status.state != ConnState::Disconnected {
+        return;
+    }
+    let Ok(profiles) = d
+        .list_profiles()
+        .await
+        .map_err(err)
+        .and_then(parse::<Vec<Profile>>)
+    else {
+        return;
+    };
+    let chosen = profile
+        .or_else(|| prefs::load().auto_profile)
+        .and_then(|id| profiles.iter().find(|p| p.id == id))
+        .or_else(|| {
+            profiles
+                .iter()
+                .filter(|p| p.last_connected_at.is_some())
+                .max_by_key(|p| p.last_connected_at)
+        })
+        .or_else(|| profiles.first());
+    let Some(p) = chosen else { return };
+    eprintln!("auto-connect to {} ({why})", p.name);
+    let result = match p.auth {
+        tunnel_core::AuthKind::Certificate => d.connect(&p.id, "", "", "").await.map_err(err),
+        tunnel_core::AuthKind::UserPass => match keyring::load(&p.id).await {
+            Ok(Some(s)) => d
+                .connect(&p.id, &s.username, &s.password, "")
+                .await
+                .map_err(err),
+            _ => Err("needs credentials".into()),
+        },
+        // A one-time code can't be automated.
+        tunnel_core::AuthKind::UserPassChallenge => Err("needs credentials".into()),
+    };
+    if result.is_err() {
+        show_main(app);
+        let _ = app.emit(
+            "tunnel://needs-credentials",
+            NeedsCredentials {
+                profile_id: p.id.clone(),
+            },
+        );
+    }
+}
+
+/// Wait until the service answers (it may start after us at login).
+async fn wait_for_daemon(app: &AppHandle) -> bool {
+    for _ in 0..30 {
+        if let Ok(d) = app.state::<Daemon>().get().await
+            && d.get_status().await.is_ok()
+        {
+            return true;
+        }
+        *app.state::<Daemon>().proxy.lock().await = None;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    false
+}
+
+async fn watch_networks(app: AppHandle) {
+    network::watch(|net| {
+        let app = app.clone();
+        async move {
+            let _ = app.emit("tunnel://network", net.clone());
+            let p = prefs::load();
+            if let Some(n) = net
+                && p.auto_connect_untrusted
+                && !p.trusted_networks.contains(&n.name)
+            {
+                auto_connect(&app, None, &format!("untrusted network {}", n.name)).await;
+            }
+        }
+    })
+    .await;
+}
+
+#[tauri::command]
+fn get_prefs() -> prefs::Prefs {
+    prefs::load()
+}
+
+#[tauri::command]
+fn set_prefs(prefs: prefs::Prefs) -> Result<prefs::Prefs, String> {
+    prefs::save(&prefs)?;
+    Ok(prefs)
+}
+
+#[tauri::command]
+async fn current_network() -> Option<network::Network> {
+    network::current().await
+}
+
+#[derive(Serialize, serde::Deserialize, Clone)]
+struct ExitInfo {
+    ip: String,
+    country_code: Option<String>,
+    city: Option<String>,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct ExitResp {
+    #[serde(default = "yes")]
+    success: bool,
+    #[serde(flatten)]
+    info: ExitInfo,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Where the VPN exits to the internet, from a geolocation service. Runs
+/// through the tunnel like any other request.
+#[tauri::command]
+async fn exit_info() -> Result<ExitInfo, String> {
+    let r: ExitResp = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .user_agent(concat!("Tunnel/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?
+        .get("https://ipwho.is/?fields=success,ip,country_code,city,latitude,longitude")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !r.success {
+        return Err("the location service didn't answer".into());
+    }
+    Ok(r.info)
+}
+
+/// `--connect` → `Some(None)` (last profile), `--connect ID` → `Some(Some(ID))`.
+fn connect_arg(args: impl IntoIterator<Item = String>) -> Option<Option<String>> {
+    let mut it = args.into_iter().skip_while(|a| a != "--connect");
+    it.next()?;
+    Some(it.next().filter(|a| !a.starts_with("--")))
 }
 
 fn show_main(app: &AppHandle) {
@@ -487,8 +687,18 @@ async fn profile_names(d: &DaemonProxy<'_>) -> std::collections::HashMap<String,
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main(app)
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A second launch: `--connect [id]` (the GNOME panel, scripts)
+            // connects; `--hidden` (login) does nothing; anything else
+            // shows the window.
+            if let Some(profile) = connect_arg(args.iter().cloned()) {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    auto_connect(&app, profile, "command line").await;
+                });
+            } else if !args.iter().any(|a| a == "--hidden") {
+                show_main(app);
+            }
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -511,12 +721,32 @@ pub fn run() {
             get_settings,
             set_settings,
             list_apps,
+            get_prefs,
+            set_prefs,
+            current_network,
+            exit_info,
+            has_credentials,
+            forget_credentials,
             probe_latency,
         ])
         .setup(|app| {
             let tray = build_tray(app.handle())?;
             app.manage(tray);
             tauri::async_runtime::spawn(pump_events(app.handle().clone()));
+            let handle = app.handle().clone();
+            let hidden = std::env::args().any(|a| a == "--hidden");
+            if hidden && let Some(w) = app.get_webview_window("main") {
+                let _ = w.hide();
+            }
+            let connect_arg = connect_arg(std::env::args());
+            tauri::async_runtime::spawn(async move {
+                if wait_for_daemon(&handle).await {
+                    if connect_arg.is_some() || prefs::load().connect_on_launch {
+                        auto_connect(&handle, connect_arg.flatten(), "startup").await;
+                    }
+                    watch_networks(handle).await;
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -528,4 +758,33 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Tunnel");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_exit_info() {
+        let r: ExitResp = serde_json::from_str(
+            r#"{"success":true,"ip":"185.107.56.12","country_code":"DE","city":"Frankfurt am Main","latitude":50.11,"longitude":8.68}"#,
+        )
+        .unwrap();
+        assert!(r.success);
+        assert_eq!(r.info.city.as_deref(), Some("Frankfurt am Main"));
+        let r: ExitResp = serde_json::from_str(r#"{"success":false,"ip":""}"#).unwrap();
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn parses_connect_args() {
+        let a = |v: &[&str]| connect_arg(v.iter().map(|s| s.to_string()));
+        assert_eq!(a(&["tunnel-desktop"]), None);
+        assert_eq!(a(&["tunnel-desktop", "--connect"]), Some(None));
+        assert_eq!(
+            a(&["tunnel-desktop", "--connect", "abc"]),
+            Some(Some("abc".into()))
+        );
+        assert_eq!(a(&["tunnel-desktop", "--connect", "--hidden"]), Some(None));
+    }
 }

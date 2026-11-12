@@ -9,7 +9,7 @@ pub mod proxy;
 pub mod split;
 
 pub use model::{
-    AuthKind, ConnState, DnsMode, FirewallMode, Profile, Settings, SplitApp, SplitMode,
-    SplitSettings, Status,
+    AuthKind, ConnState, DnsMode, FirewallMode, Profile, ProxyGateway, Settings, SplitApp,
+    SplitMode, SplitSettings, Status,
 };
 pub use proxy::DaemonProxy;

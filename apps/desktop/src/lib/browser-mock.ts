@@ -4,7 +4,7 @@
  * interface without root or a VPN server.
  */
 import type { DaemonInfo, ImportResult, Profile, Status } from "./types";
-import { defaultSettings, emptyStatus, type Settings as SettingsT } from "./types";
+import { defaultPrefs, defaultSettings, emptyStatus, type Prefs, type Settings as SettingsT } from "./types";
 
 type Handler = (payload: unknown) => void;
 const handlers = new Map<string, Set<Handler>>();
@@ -40,6 +40,8 @@ const profiles: Profile[] = [
 let settings: SettingsT = { ...defaultSettings };
 let status: Status = { ...emptyStatus };
 let blockedAfterDrop = false;
+const saved = new Set<string>();
+let prefs: Prefs = { ...defaultPrefs };
 
 function firewallFields(s: Status): Partial<Status> {
   const active = s.state !== "disconnected";
@@ -84,6 +86,7 @@ function startSession(id: string) {
         server_ip: "203.0.113.24",
         dns_servers: settings.dns.mode === "custom" ? settings.dns.servers : ["10.8.0.1"],
         split_active: settings.split.enabled,
+        proxy_address: settings.proxy_gateway.enabled ? `192.168.1.50:${settings.proxy_gateway.port}` : null,
       });
       addLog("MOCK: Initialization Sequence Completed");
       let rx = 0;
@@ -129,13 +132,31 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
     case "connect": {
       const p = profiles.find((x) => x.id === args.id);
       if (!p) throw "No such profile";
-      if (p.auth !== "certificate" && !args.username) throw "This profile needs a username and password.";
+      if (args.username && args.remember) saved.add(p.id);
+      if (args.username && args.remember === false) saved.delete(p.id);
+      if (p.auth !== "certificate" && !args.username && !saved.has(p.id))
+        throw "This profile needs a username and password.";
       p.last_connected_at = now();
       startSession(p.id);
       return null;
     }
     case "get_settings":
       return settings;
+    case "get_prefs":
+      return prefs;
+    case "set_prefs":
+      prefs = args.prefs as Prefs;
+      return prefs;
+    case "current_network":
+      return { name: "Home Wi-Fi", wireless: true };
+    case "exit_info":
+      await new Promise((r) => setTimeout(r, 400));
+      return { ip: "185.107.56.12", country_code: "DE", city: "Frankfurt am Main", latitude: 50.11, longitude: 8.68 };
+    case "has_credentials":
+      return saved.has(args.id as string);
+    case "forget_credentials":
+      saved.delete(args.id as string);
+      return null;
     case "list_apps":
       return [
         ["Firefox", "/usr/bin/firefox"],

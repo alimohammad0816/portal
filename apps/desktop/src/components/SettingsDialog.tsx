@@ -7,9 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { DnsSettings, FirewallSettings } from "@/components/SecuritySettings";
+import { DnsSettings, FirewallSettings, GatewaySettings } from "@/components/SecuritySettings";
+import { GeneralSettings } from "@/components/GeneralSettings";
 import { SplitSettings } from "@/components/SplitSettings";
-import { api, errorText, type Profile, type Settings, type Status, type UpdateInfo } from "@/lib/api";
+import { api, errorText, type Network, type Prefs, type Profile, type Settings, type Status, type UpdateInfo } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
 
 function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () => void }) {
@@ -18,6 +19,11 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
   const [country, setCountry] = useState(profile.country ?? "");
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (profile.auth !== "certificate") api.hasCredentials(profile.id).then(setSaved).catch(() => {});
+  }, [profile.id, profile.auth]);
   const dirty = name !== profile.name || group !== profile.group || country !== (profile.country ?? "");
 
   async function save() {
@@ -80,6 +86,19 @@ function ProfileRow({ profile, onChanged }: { profile: Profile; onChanged: () =>
           className="h-8 text-center font-mono text-[13px]"
         />
       </div>
+      {saved && (
+        <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span>Password saved in your keyring</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-muted-foreground"
+            onClick={() => api.forgetCredentials(profile.id).then(() => setSaved(false)).catch((e) => setError(errorText(e)))}
+          >
+            Forget
+          </Button>
+        </div>
+      )}
       {(dirty || error) && (
         <div className="flex items-center justify-between gap-2">
           <span className="text-[12px] text-destructive">{error}</span>
@@ -199,6 +218,9 @@ export function SettingsDialog({
   onSettingsChange,
   tab,
   onTabChange,
+  prefs,
+  onPrefsChange,
+  network,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -211,6 +233,9 @@ export function SettingsDialog({
   onSettingsChange: (s: Settings) => void;
   tab: string;
   onTabChange: (tab: string) => void;
+  prefs: Prefs;
+  onPrefsChange: (p: Prefs) => void;
+  network: Network | null;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -226,7 +251,7 @@ export function SettingsDialog({
             <TabsTrigger value="dns">DNS</TabsTrigger>
             <TabsTrigger value="profiles">Profiles</TabsTrigger>
             <TabsTrigger value="log">Log</TabsTrigger>
-            <TabsTrigger value="about">About</TabsTrigger>
+            <TabsTrigger value="about">General</TabsTrigger>
           </TabsList>
           <TabsContent value="split">
             <div className="scroll-subtle max-h-[28rem] overflow-y-auto pr-1">
@@ -234,7 +259,10 @@ export function SettingsDialog({
             </div>
           </TabsContent>
           <TabsContent value="firewall">
-            <FirewallSettings settings={settings} onChange={onSettingsChange} />
+            <div className="scroll-subtle grid max-h-[28rem] gap-4 overflow-y-auto pr-1">
+              <FirewallSettings settings={settings} onChange={onSettingsChange} />
+              <GatewaySettings settings={settings} status={status} onChange={onSettingsChange} />
+            </div>
           </TabsContent>
           <TabsContent value="dns">
             <DnsSettings settings={settings} status={status} onChange={onSettingsChange} />
@@ -252,7 +280,12 @@ export function SettingsDialog({
             <LogView lines={log} />
           </TabsContent>
           <TabsContent value="about">
-            <AboutView u={updates} />
+            <div className="scroll-subtle grid max-h-[28rem] gap-5 overflow-y-auto pr-1">
+              <GeneralSettings prefs={prefs} onChange={onPrefsChange} profiles={profiles} network={network} />
+              <div className="border-t pt-1">
+                <AboutView u={updates} />
+              </div>
+            </div>
           </TabsContent>
         </Tabs>
       </DialogContent>

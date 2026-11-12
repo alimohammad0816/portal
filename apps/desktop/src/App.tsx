@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { type Credentials, CredentialsDialog } from "@/components/CredentialsDialog";
+import { type Credentials, CredentialsDialog, type CredentialsRequest } from "@/components/CredentialsDialog";
 import { type Latency, LocationList } from "@/components/LocationList";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { Sparkline } from "@/components/Sparkline";
@@ -28,14 +28,20 @@ import { WorldMap } from "@/components/WorldMap";
 import {
   api,
   type DaemonInfo,
+  defaultPrefs,
   defaultSettings,
   emptyStatus,
   errorText,
+  type ExitInfo,
   inTauri,
   onDaemon,
   onLog,
+  onNeedsCredentials,
+  onNetwork,
   onSettings,
   onStatus,
+  type Network,
+  type Prefs,
   type Profile,
   type Settings,
   type Status,
@@ -95,7 +101,7 @@ export function App() {
   const [favorites, setFavorites] = useState<Set<string>>(loadFavorites);
   const [pickedId, setPickedId] = useState<string | null>(null);
   const [latency, setLatency] = useState<Record<string, Latency>>({});
-  const [credsFor, setCredsFor] = useState<Profile | null>(null);
+  const [credsFor, setCredsFor] = useState<CredentialsRequest | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState("split");
@@ -110,6 +116,9 @@ export function App() {
   const [updateOpen, setUpdateOpen] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
   const [versions, setVersions] = useState<Versions | null>(null);
+  const [prefs, setPrefs] = useState<Prefs>(defaultPrefs);
+  const [network, setNetwork] = useState<Network | null>(null);
+  const [exit, setExit] = useState<ExitInfo | null>(null);
 
   const home = useMemo(homeLocation, []);
 
@@ -169,6 +178,11 @@ export function App() {
     const subs = [
       onStatus((s) => {
         setStatus(s);
+        // A saved password that the server rejects is useless: drop it so
+        // the next attempt asks.
+        if (s.error?.includes("Authentication failed") && s.profile_id) {
+          api.forgetCredentials(s.profile_id).catch(() => {});
+        }
         if (s.state === "connected") {
           setRates((r) => ({ rx: [...r.rx, s.rate_in].slice(-HISTORY), tx: [...r.tx, s.rate_out].slice(-HISTORY) }));
         } else if (s.state === "disconnected") {
@@ -177,6 +191,7 @@ export function App() {
       }),
       onLog((line) => setLog((l) => [...l.slice(-999), line])),
       onSettings(setSettings),
+      onNetwork(setNetwork),
       onDaemon((info) => {
         setDaemon(info);
         if (info.reachable) {
@@ -189,6 +204,41 @@ export function App() {
       subs.forEach((p) => p.then((un) => un()));
     };
   }, [refreshAll]);
+
+  // The app tried to connect by itself (login, untrusted network) and
+  // needs a password or one-time code.
+  useEffect(() => {
+    const un = onNeedsCredentials((id) => {
+      const p = profiles.find((x) => x.id === id);
+      if (p) connectTo(p);
+    });
+    return () => {
+      un.then((f) => f());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profiles]);
+
+  // App preferences and the current network.
+  useEffect(() => {
+    api.getPrefs().then(setPrefs).catch(() => {});
+    api.currentNetwork().then(setNetwork).catch(() => {});
+  }, []);
+
+  // Where the VPN exits, for the map, once DNS works through the tunnel.
+  const exitKey = status.state === "connected" && status.dns_servers.length > 0 ? status.profile_id : null;
+  useEffect(() => {
+    setExit(null);
+    if (!exitKey || !prefs.show_exit_location) return;
+    if (settings.split.enabled && settings.split.mode === "include") return; // lookups wouldn't use the VPN
+    let cancelled = false;
+    api
+      .exitInfo()
+      .then((e) => !cancelled && setExit(e))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [exitKey, prefs.show_exit_location, settings.split.enabled, settings.split.mode]);
 
   // Session clock.
   useEffect(() => {
@@ -276,16 +326,30 @@ export function App() {
   async function doConnect(p: Profile, c?: Credentials) {
     setNotice(null);
     try {
-      await api.connect(p.id, c?.username ?? "", c?.password ?? "", c?.response ?? "");
+      await api.connect(p.id, c?.username ?? "", c?.password ?? "", c?.response ?? "", c?.remember, p.name);
     } catch (e) {
-      setNotice(errorText(e));
+      const msg = errorText(e);
+      // Nothing saved after all (or the keyring is locked): ask.
+      if (!c?.username && msg.includes("needs a username")) setCredsFor({ profile: p, otpOnly: false });
+      else setNotice(msg);
     }
   }
 
-  function connectTo(p: Profile) {
+  async function connectTo(p: Profile) {
     setPickedId(p.id);
-    if (p.auth === "certificate") doConnect(p);
-    else setCredsFor(p);
+    if (p.auth === "certificate") return doConnect(p);
+    const saved = await api.hasCredentials(p.id).catch(() => false);
+    if (saved && p.auth === "user_pass") return doConnect(p);
+    setCredsFor({ profile: p, otpOnly: saved });
+  }
+
+  async function changePrefs(next: Prefs) {
+    setPrefs(next);
+    try {
+      setPrefs(await api.setPrefs(next));
+    } catch (e) {
+      setNotice(errorText(e));
+    }
   }
 
   async function changeSettings(next: Settings) {
@@ -359,7 +423,14 @@ export function App() {
   const live = status.state === "connected";
   const busy = status.state === "connecting" || status.state === "disconnecting" || status.state === "needs_credentials";
   const statusColor = live ? "text-success" : busy ? "text-warning" : "text-muted-foreground";
-  const mapLabel = live && selected ? `${selected.name}${selected.country ? `, ${selected.country}` : ""}` : busy ? "Connecting" : "Unprotected";
+  const mapLabel =
+    live && selected
+      ? exit?.city
+        ? `${exit.city}${exit.country_code ? `, ${exit.country_code}` : ""}`
+        : `${selected.name}${selected.country ? `, ${selected.country}` : ""}`
+      : busy
+        ? "Connecting"
+        : "Unprotected";
   const error = notice ?? status.error;
 
   return (
@@ -417,10 +488,10 @@ export function App() {
       <div className="px-4">
         <WorldMap
           home={home}
-          server={countryLocation(selected?.country)}
+          server={exit?.latitude != null && exit.longitude != null ? [exit.longitude, exit.latitude] : countryLocation(selected?.country)}
           state={status.state}
           label={mapLabel}
-          exitIp={live ? status.server_ip : null}
+          exitIp={live ? (exit?.ip ?? status.server_ip) : null}
         />
       </div>
 
@@ -594,10 +665,10 @@ export function App() {
       )}
 
       <CredentialsDialog
-        profile={credsFor}
+        request={credsFor}
         onCancel={() => setCredsFor(null)}
         onSubmit={(c) => {
-          const p = credsFor;
+          const p = credsFor?.profile;
           setCredsFor(null);
           if (p) doConnect(p, c);
         }}
@@ -613,6 +684,9 @@ export function App() {
         onSettingsChange={changeSettings}
         tab={settingsTab}
         onTabChange={setSettingsTab}
+        prefs={prefs}
+        onPrefsChange={changePrefs}
+        network={network}
         updates={{
           autoCheck,
           onAutoCheckChange: (on) => {

@@ -35,6 +35,7 @@ export interface Status {
   split_active: boolean;
   split_needs_reconnect: boolean;
   split_processes: number;
+  proxy_address: string | null;
 }
 
 export type SplitMode = "exclude" | "include";
@@ -69,6 +70,7 @@ export interface Settings {
   dns: DnsMode;
   dns_leak_protection: boolean;
   split: SplitSettings;
+  proxy_gateway: { enabled: boolean; port: number };
 }
 
 export const defaultSettings: Settings = {
@@ -78,6 +80,7 @@ export const defaultSettings: Settings = {
   dns: { mode: "vpn" },
   dns_leak_protection: true,
   split: { enabled: false, mode: "exclude", apps: [], hosts: [], countries: [] },
+  proxy_gateway: { enabled: false, port: 1080 },
 };
 
 export interface ImportResult {
@@ -127,4 +130,37 @@ export const emptyStatus: Status = {
   split_active: false,
   split_needs_reconnect: false,
   split_processes: 0,
+  proxy_address: null,
 };
+
+export interface Prefs {
+  launch_at_login: boolean;
+  connect_on_launch: boolean;
+  auto_connect_untrusted: boolean;
+  trusted_networks: string[];
+  auto_profile: string | null;
+  show_exit_location: boolean;
+}
+
+export const defaultPrefs: Prefs = {
+  launch_at_login: false,
+  connect_on_launch: false,
+  auto_connect_untrusted: false,
+  trusted_networks: [],
+  auto_profile: null,
+  show_exit_location: true,
+};
+
+export interface Network {
+  name: string;
+  wireless: boolean;
+}
+
+export interface ExitInfo {
+  ip: string;
+  country_code: string | null;
+  city: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}
+
