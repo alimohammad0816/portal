@@ -16,6 +16,7 @@ pub mod net;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use portal_core::names::TUNNEL_IFACE;
@@ -23,16 +24,12 @@ use portal_core::split::{DomainList, Rule};
 use portal_core::{SplitMode, SplitSettings};
 use tracing::{info, warn};
 
-use self::dnsproxy::{Proxy, ProxyConfig, Sink};
+use self::dnsproxy::Proxy;
 
 /// Facts about the running connection that split tunneling needs.
 #[derive(Debug, Clone, Default)]
 pub struct Link {
     pub server_ip: Option<String>,
-    /// Resolvers on the VPN side.
-    pub vpn_dns: Vec<IpAddr>,
-    /// The physical network's resolvers.
-    pub direct_dns: Vec<IpAddr>,
 }
 
 pub struct Split {
@@ -41,7 +38,9 @@ pub struct Split {
     system: bool,
     daemon_cgroup: Option<String>,
     mode: Option<SplitMode>,
-    proxy: Option<Proxy>,
+    /// The DNS proxy, which the manager runs; split tunneling tells it
+    /// which names to record.
+    proxy: Option<Arc<Proxy>>,
     tracker: Option<apps::Tracker>,
     server_ip: Option<IpAddr>,
     /// Rules in force, to tell what a change added or removed.
@@ -128,12 +127,6 @@ impl Split {
         self.mode
     }
 
-    /// Address resolved should send the tunnel's lookups to while split
-    /// tunneling runs.
-    pub fn dns_listen(&self) -> Option<IpAddr> {
-        self.proxy.as_ref().map(|p| p.addr.ip())
-    }
-
     pub fn apps_moved(&self) -> usize {
         self.tracker.as_ref().map_or(0, apps::Tracker::count)
     }
@@ -145,8 +138,15 @@ impl Split {
         Ok(self.tracker.as_mut().expect("just set"))
     }
 
-    /// Set everything up for a fresh connection.
-    pub fn start(&mut self, s: &SplitSettings, countries: &[String], link: &Link) -> Result<()> {
+    /// Set everything up for a fresh connection. Domain rules need the DNS
+    /// proxy.
+    pub fn start(
+        &mut self,
+        s: &SplitSettings,
+        countries: &[String],
+        link: &Link,
+        proxy: Option<Arc<Proxy>>,
+    ) -> Result<()> {
         self.stop();
         if !s.enabled {
             return Ok(());
@@ -168,16 +168,13 @@ impl Split {
                 self.stop();
                 return Err(e);
             }
-            let config = ProxyConfig {
-                mode,
-                domains: DomainList::new(&rules(s)),
-                vpn: link.vpn_dns.clone(),
-                direct: link.direct_dns.clone(),
-                upstream_port: 53,
-            };
-            match Proxy::start(dnsproxy::LISTEN, config, Sink::Nft) {
-                Ok(p) => self.proxy = Some(p),
-                Err(e) => warn!("split DNS isn't available, domain rules won't apply: {e:#}"),
+            match proxy {
+                Some(p) => {
+                    p.update(|c| c.mode = Some(mode));
+                    p.set_domains(DomainList::new(&rules(s)));
+                    self.proxy = Some(p);
+                }
+                None => warn!("split DNS isn't available, domain rules won't apply"),
             }
             self.tracker()?.set_apps(&s.apps);
         }
@@ -417,15 +414,6 @@ impl Split {
         });
     }
 
-    pub fn set_dns(&mut self, vpn: &[IpAddr], direct: &[IpAddr]) {
-        if let Some(p) = &self.proxy {
-            p.update(|c| {
-                c.vpn = vpn.to_vec();
-                c.direct = direct.to_vec();
-            });
-        }
-    }
-
     /// Move a process (and its future children) into the split cgroup.
     pub fn bypass(&mut self, pid: u32) -> Result<()> {
         anyhow::ensure!(
@@ -437,7 +425,9 @@ impl Split {
 
     pub fn stop(&mut self) {
         if let Some(p) = self.proxy.take() {
-            p.stop();
+            // The proxy may keep running for blocking.
+            p.set_domains(DomainList::default());
+            p.update(|c| c.mode = None);
         }
         if let Some(t) = self.tracker.as_mut() {
             t.stop();
@@ -479,7 +469,7 @@ mod tests {
             enabled: true,
             ..SplitSettings::default()
         };
-        sp.start(&s, &[], &Link::default()).unwrap();
+        sp.start(&s, &[], &Link::default(), None).unwrap();
         assert_eq!(sp.mode(), Some(SplitMode::Exclude));
         sp.stop();
         assert_eq!(sp.mode(), None);

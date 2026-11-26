@@ -76,6 +76,29 @@ export interface Status {
   proxy_address: string | null;
   request: InputRequest | null;
   auth_url: string | null;
+  /** The blocklists that are on, and how they're doing. */
+  blocklists: BlocklistStatus[];
+  /** Lookups blocked since the tunnel came up. */
+  blocked_queries: number;
+}
+
+export interface BlocklistStatus {
+  id: string;
+  /** 0 until loaded. */
+  domains: number;
+  /** Unix seconds of the download. */
+  updated_at: number | null;
+  loading: boolean;
+  error: string | null;
+}
+
+export interface BlockingSettings {
+  /** Ids of the categories that are on. */
+  lists: string[];
+  /** Never blocked; split rule syntax. */
+  allow: string[];
+  /** Also blocked; split rule syntax. */
+  block: string[];
 }
 
 export type SplitMode = "exclude" | "include";
@@ -114,6 +137,7 @@ export interface Settings {
   split: SplitSettings;
   proxy_gateway: { enabled: boolean; port: number };
   connection_proxy: ConnectionProxy;
+  blocking: BlockingSettings;
 }
 
 export type ProxyKind = "profile" | "http" | "socks";
@@ -134,6 +158,7 @@ export const defaultSettings: Settings = {
   split: { enabled: false, mode: "exclude", apps: [], hosts: [], countries: [] },
   proxy_gateway: { enabled: false, port: 1080 },
   connection_proxy: { kind: "profile", host: "", port: 8080, auth: false },
+  blocking: { lists: [], allow: [], block: [] },
 };
 
 export interface ImportResult {
@@ -187,6 +212,8 @@ export const emptyStatus: Status = {
   proxy_address: null,
   request: null,
   auth_url: null,
+  blocklists: [],
+  blocked_queries: 0,
 };
 
 export interface Prefs {

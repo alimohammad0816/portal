@@ -2,6 +2,7 @@
 //! desktop app: the D-Bus contract, the data model sent over it, and the
 //! OpenVPN config parser/sanitizer.
 
+pub mod blocking;
 pub mod model;
 pub mod names;
 pub mod ovpn;
@@ -9,6 +10,7 @@ pub mod package;
 pub mod proxy;
 pub mod split;
 
+pub use blocking::{BlockingSettings, BlocklistStatus};
 pub use model::{
     AuthKind, ConnState, ConnectionProxy, DnsMode, FirewallMode, InputKind, InputRequest, Profile,
     ProfileEdit, ProxyGateway, ProxyKind, Secrets, Settings, SplitApp, SplitMode, SplitSettings,

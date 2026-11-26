@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::blocking::{BlockingSettings, BlocklistStatus};
+
 /// How a profile authenticates, as far as the client has to care.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -192,6 +194,12 @@ pub struct Status {
     /// The server wants you to sign in on a web page (SSO).
     #[serde(default)]
     pub auth_url: Option<String>,
+    /// The blocklists that are on, and how they're doing.
+    #[serde(default)]
+    pub blocklists: Vec<BlocklistStatus>,
+    /// Lookups blocked since the tunnel came up.
+    #[serde(default)]
+    pub blocked_queries: u64,
 }
 
 /// How OpenVPN reaches the server.
@@ -310,6 +318,8 @@ pub struct Settings {
     pub split: SplitSettings,
     pub proxy_gateway: ProxyGateway,
     pub connection_proxy: ConnectionProxy,
+    /// Ads, trackers and other categories blocked through DNS.
+    pub blocking: BlockingSettings,
 }
 
 /// Which side of the tunnel the listed traffic goes to.
@@ -385,6 +395,7 @@ impl Default for Settings {
             split: SplitSettings::default(),
             proxy_gateway: ProxyGateway::default(),
             connection_proxy: ConnectionProxy::default(),
+            blocking: BlockingSettings::default(),
         }
     }
 }
@@ -429,6 +440,7 @@ impl Settings {
                 return Err(format!("`{}` isn't an absolute path.", a.path));
             }
         }
+        self.blocking.validate()?;
         if let DnsMode::Custom(servers) = &self.dns {
             if servers.is_empty() {
                 return Err("Add at least one DNS server.".into());

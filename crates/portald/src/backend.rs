@@ -45,6 +45,11 @@ pub enum Event {
         countries: Vec<String>,
         networks: Vec<String>,
     },
+    /// A blocklist was loaded, or failed to (manager's own task).
+    BlocklistLoaded {
+        id: String,
+        result: Result<crate::blocking::Loaded, String>,
+    },
     /// OpenVPN wants something we weren't given. With `live` the session
     /// keeps waiting for [`SessionHandle::answer`]; otherwise it is ending
     /// and has to be started again with the answer. `crv1` carries a

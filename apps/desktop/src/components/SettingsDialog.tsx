@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { ScrollFade } from "@/components/ui/scroll-fade";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConnectionProxySettings, DnsSettings, FirewallSettings, GatewaySettings } from "@/components/SecuritySettings";
+import { BlockingSettings } from "@/components/BlockingSettings";
 import { GeneralSettings } from "@/components/GeneralSettings";
 import { SplitSettings } from "@/components/SplitSettings";
 import {
@@ -319,8 +320,9 @@ export function SettingsDialog({
           <DialogDescription>Changes apply right away, without reconnecting.</DialogDescription>
         </DialogHeader>
         <Tabs value={tab} onValueChange={onTabChange}>
-          <TabsList className="w-full">
+          <TabsList className="w-full [&_[data-slot=tabs-trigger]]:px-1.5">
             <TabsTrigger value="split">Split</TabsTrigger>
+            <TabsTrigger value="blocking">Blocking</TabsTrigger>
             <TabsTrigger value="firewall">Network</TabsTrigger>
             <TabsTrigger value="dns">DNS</TabsTrigger>
             <TabsTrigger value="profiles">Profiles</TabsTrigger>
@@ -330,6 +332,11 @@ export function SettingsDialog({
           <TabsContent value="split">
             <ScrollFade className="scroll-gutter max-h-[calc(100vh-15rem)] overflow-y-auto">
               <SplitSettings settings={settings} status={status} onChange={onSettingsChange} />
+            </ScrollFade>
+          </TabsContent>
+          <TabsContent value="blocking">
+            <ScrollFade className="scroll-gutter max-h-[calc(100vh-15rem)] overflow-y-auto">
+              <BlockingSettings settings={settings} status={status} onChange={onSettingsChange} />
             </ScrollFade>
           </TabsContent>
           <TabsContent value="firewall">

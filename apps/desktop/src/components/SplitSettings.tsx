@@ -33,11 +33,11 @@ const KIND_TITLE = {
 } as const;
 
 /** Rules that mean the same: case and a trailing dot don't matter. */
-function hostKey(h: string): string {
+export function hostKey(h: string): string {
   return h.toLowerCase().replace(/\.$/, "");
 }
 
-function validHost(h: string): boolean {
+export function validHost(h: string): boolean {
   const kind = hostKind(h);
   if (kind === "CIDR") {
     const [addr, len] = h.split("/");
@@ -128,7 +128,7 @@ function AppGlyph({ name }: { name: string }) {
   );
 }
 
-function Section({
+export function Section({
   title,
   hint,
   count,
@@ -194,7 +194,15 @@ function Chip({ icon, label, title, onRemove }: { icon?: React.ReactNode; label:
 
 /** Rules as wrapping chips in a box that scrolls on its own once it fills,
  * with a filter when there are many. */
-function HostList({ hosts, onRemove }: { hosts: string[]; onRemove: (h: string) => void }) {
+export function HostList({
+  hosts,
+  onRemove,
+  label = "Filter sites and IP ranges",
+}: {
+  hosts: string[];
+  onRemove: (h: string) => void;
+  label?: string;
+}) {
   const [filter, setFilter] = useState("");
   const q = filter.trim().toLowerCase();
   const shown = q ? hosts.filter((h) => h.toLowerCase().includes(q)) : hosts;
@@ -207,7 +215,7 @@ function HostList({ hosts, onRemove }: { hosts: string[]; onRemove: (h: string) 
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder={`Filter ${hosts.length} entries`}
-            aria-label="Filter sites and IP ranges"
+            aria-label={label}
             className="min-w-0 flex-1 bg-transparent font-mono text-xs text-foreground outline-none placeholder:font-sans placeholder:text-dim"
           />
         </label>

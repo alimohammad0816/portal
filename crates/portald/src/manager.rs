@@ -3,26 +3,30 @@
 //! firewall, DNS and split tunneling in line with the connection;
 //! publishes changes.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
+use portal_core::blocking::BLOCKLISTS;
 use portal_core::names::TUNNEL_IFACE;
 use portal_core::split::{DomainList, Rule};
 use portal_core::{
-    ConnState, DnsMode, FirewallMode, InputKind, Profile, ProfileEdit, Settings, SplitMode, Status,
+    BlocklistStatus, ConnState, DnsMode, FirewallMode, InputKind, Profile, ProfileEdit, Settings,
+    SplitMode, Status,
 };
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 use crate::backend::{Backend, Credentials, Event, EventTx, Launch, SessionHandle};
+use crate::blocking::Filter;
 use crate::dns::LinkDns;
 use crate::firewall::{self, Firewall, Plan};
 use crate::gateway::Gateway;
 use crate::profiles::{ProfileStore, write_private};
+use crate::split::dnsproxy::{self, Proxy, ProxyConfig, Sink};
 use crate::split::{Link, Split, geoip};
 
 const LOG_LINES: usize = 500;
@@ -43,6 +47,14 @@ pub struct Platform {
     pub settings_path: PathBuf,
     /// Where country IP lists are cached.
     pub geoip_dir: PathBuf,
+    /// Where blocklists are cached.
+    pub blocklist_dir: PathBuf,
+}
+
+/// A blocklist in memory.
+struct List {
+    hashes: Arc<Vec<u64>>,
+    status: BlocklistStatus,
 }
 
 pub struct Manager {
@@ -79,6 +91,12 @@ pub struct Manager {
     /// The physical network's resolvers, learned when DNS was applied.
     direct_dns: Vec<IpAddr>,
     gateway: Option<Gateway>,
+    /// Local DNS forwarder for split domains and blocking, while
+    /// connected and either needs it.
+    dns_proxy: Option<Arc<Proxy>>,
+    /// Blocklists that are on, by id.
+    lists: HashMap<String, List>,
+    filter: Arc<Filter>,
 
     pending: Option<Pending>,
     /// What this session was started with, kept only while it runs or
@@ -161,11 +179,15 @@ impl Manager {
             geo: (Vec::new(), Vec::new()),
             direct_dns: Vec::new(),
             gateway: None,
+            dns_proxy: None,
+            lists: HashMap::new(),
+            filter: Arc::default(),
             pending: None,
             session_secrets: None,
         };
         mgr.sync_firewall();
         mgr.load_geo();
+        mgr.load_blocklists();
         let mgr = Arc::new(Mutex::new(mgr));
         let weak = Arc::downgrade(&mgr);
         tokio::spawn(async move {
@@ -181,8 +203,16 @@ impl Manager {
         self.store.list()
     }
 
-    pub fn status(&self) -> &Status {
-        &self.status
+    /// The status as clients see it.
+    pub fn status(&self) -> Status {
+        let mut s = self.status.clone();
+        s.blocklists = BLOCKLISTS
+            .iter()
+            .filter_map(|b| self.lists.get(b.id))
+            .map(|l| l.status.clone())
+            .collect();
+        s.blocked_queries = self.dns_proxy.as_ref().map_or(0, |p| p.blocked());
+        s
     }
 
     pub fn settings(&self) -> &Settings {
@@ -231,9 +261,18 @@ impl Manager {
         if old.split.countries != new.split.countries {
             self.load_geo();
         }
+        if old.blocking != new.blocking {
+            self.load_blocklists();
+        }
         if self.status.state == ConnState::Connected {
+            // Before split tunneling, which needs the proxy to start.
+            let proxy_changed = self.sync_proxy();
             self.apply_split_change(&old);
-            if new.dns != old.dns || new.split.enabled != old.split.enabled {
+            if proxy_changed
+                || new.dns != old.dns
+                || new.split.enabled != old.split.enabled
+                || new.blocking.active() != old.blocking.active()
+            {
                 self.apply_dns();
             }
         }
@@ -271,10 +310,148 @@ impl Manager {
     fn start_split(&mut self) -> Result<()> {
         let link = Link {
             server_ip: self.status.server_ip.clone(),
-            vpn_dns: self.vpn_dns(),
-            direct_dns: self.direct_dns.clone(),
         };
-        self.split.start(&self.settings.split, &self.geo.1, &link)
+        self.split.start(
+            &self.settings.split,
+            &self.geo.1,
+            &link,
+            self.dns_proxy.clone(),
+        )
+    }
+
+    /// Run the DNS proxy while connected, if split tunneling or blocking
+    /// needs it. Returns whether it started or stopped.
+    fn sync_proxy(&mut self) -> bool {
+        let want = self.platform.system
+            && self.status.state == ConnState::Connected
+            && (self.settings.split.enabled || self.settings.blocking.active());
+        match (self.dns_proxy.is_some(), want) {
+            (false, true) => {
+                let config = ProxyConfig {
+                    mode: None,
+                    domains: DomainList::default(),
+                    vpn: self.vpn_dns(),
+                    direct: self.direct_dns.clone(),
+                    upstream_port: 53,
+                    filter: self.filter.clone(),
+                };
+                match Proxy::start(dnsproxy::LISTEN, config, Sink::Nft) {
+                    Ok(p) => {
+                        self.dns_proxy = Some(Arc::new(p));
+                        true
+                    }
+                    Err(e) => {
+                        warn!("DNS proxy: {e:#}");
+                        self.push_log(format!(
+                            "Split domains and blocking aren't available: {e:#}"
+                        ));
+                        false
+                    }
+                }
+            }
+            (true, false) => {
+                self.stop_proxy();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn stop_proxy(&mut self) {
+        if let Some(p) = self.dns_proxy.take() {
+            p.stop();
+        }
+    }
+
+    /// Tell the proxy which resolvers to ask.
+    fn proxy_dns(&self) {
+        if let Some(p) = &self.dns_proxy {
+            let (vpn, direct) = (self.vpn_dns(), self.direct_dns.clone());
+            p.update(|c| {
+                c.vpn = vpn;
+                c.direct = direct;
+            });
+        }
+    }
+
+    /// Load the blocklists that are on, in the background: from the cache,
+    /// or downloaded when it's missing or a day old. Lists turned off are
+    /// dropped from memory.
+    fn load_blocklists(&mut self) {
+        let on = self.settings.blocking.lists.clone();
+        self.lists.retain(|id, _| on.contains(id));
+        let stale = |l: &List| {
+            l.status
+                .updated_at
+                .is_some_and(|t| now().saturating_sub(t) > crate::blocking::MAX_AGE.as_secs())
+        };
+        for id in on {
+            let Some(list) = portal_core::blocking::blocklist(&id) else {
+                continue;
+            };
+            let entry = self.lists.entry(id.clone()).or_insert_with(|| List {
+                hashes: Arc::default(),
+                status: BlocklistStatus {
+                    id: id.clone(),
+                    ..BlocklistStatus::default()
+                },
+            });
+            let need = entry.status.updated_at.is_none() || stale(entry);
+            if entry.status.loading || !need {
+                continue;
+            }
+            entry.status.loading = true;
+            let (dir, events, seq) = (
+                self.platform.blocklist_dir.clone(),
+                self.events.clone(),
+                self.seq,
+            );
+            tokio::spawn(async move {
+                let result = crate::blocking::load(&dir, list)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                let _ = events.send((seq, Event::BlocklistLoaded { id, result }));
+            });
+        }
+        self.rebuild_filter();
+    }
+
+    /// Put the loaded lists and the user's rules together for the proxy.
+    fn rebuild_filter(&mut self) {
+        let b = &self.settings.blocking;
+        let lists = b
+            .lists
+            .iter()
+            .filter_map(|id| self.lists.get(id))
+            .map(|l| l.hashes.as_slice());
+        let filter = Arc::new(Filter::new(lists, b, self.server_names()));
+        self.filter = filter.clone();
+        if let Some(p) = &self.dns_proxy {
+            p.update(|c| c.filter = filter);
+        }
+    }
+
+    /// Names of the current profile's servers, which are never blocked.
+    fn server_names(&self) -> Vec<String> {
+        let Some(id) = self.status.profile_id.as_deref() else {
+            return Vec::new();
+        };
+        let config = self.store.config_text(id).unwrap_or_default();
+        let mut names: Vec<String> = config
+            .lines()
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                (w.next()?.trim_start_matches("--") == "remote")
+                    .then(|| w.next().map(str::to_string))
+                    .flatten()
+            })
+            .collect();
+        if let Some(p) = self.store.get(id) {
+            names.push(p.remote_host.clone());
+        }
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Run the proxy gateway while connected, if it's on.
@@ -391,6 +568,7 @@ impl Manager {
         }
         let old = self.session.take();
         self.split.stop();
+        self.stop_proxy();
         self.pending = None;
         self.session_secrets = Some(creds.clone());
         self.seq += 1;
@@ -546,6 +724,7 @@ impl Manager {
         let handle = self.session.take()?;
         self.user_stopped = true;
         self.split.stop();
+        self.stop_proxy();
         self.refresh_split_status();
         self.status.state = ConnState::Disconnecting;
         self.publish();
@@ -558,6 +737,7 @@ impl Manager {
             g.stop();
         }
         self.split.stop();
+        self.stop_proxy();
         if self.settings.firewall != FirewallMode::Always {
             self.firewall.clear();
         }
@@ -616,8 +796,9 @@ impl Manager {
         let servers = self.vpn_dns();
         let search = self.pushed.1.clone();
         let (seq, events, system) = (self.seq, self.events.clone(), self.platform.system);
-        let proxy = self.split.dns_listen();
+        let proxy = self.dns_proxy.as_ref().map(|p| p.addr.ip());
         let split_mode = self.split.mode();
+        let blocking = self.settings.blocking.active();
         let split_domains: Vec<String> = DomainList::new(
             &self
                 .settings
@@ -641,7 +822,10 @@ impl Manager {
                 // Learn the physical resolvers before the tunnel takes over.
                 direct = crate::dns::system_servers(TUNNEL_IFACE).await;
                 let cfg = match (proxy, split_mode) {
-                    (Some(p), Some(SplitMode::Include)) => LinkDns {
+                    // Include mode leaves other lookups outside, unless
+                    // they have to pass the blocklists (the proxy then
+                    // sends them to the physical network's resolvers).
+                    (Some(p), Some(SplitMode::Include)) if !blocking => LinkDns {
                         servers: vec![p],
                         routing: split_domains,
                         search: Vec::new(),
@@ -696,6 +880,28 @@ impl Manager {
             }
             return;
         }
+        if let Event::BlocklistLoaded { id, result } = event {
+            if let Some(l) = self.lists.get_mut(&id) {
+                l.status.loading = false;
+                match result {
+                    Ok(loaded) => {
+                        l.status.domains = loaded.hashes.len();
+                        l.status.updated_at = Some(loaded.updated_at);
+                        l.status.error = loaded.stale;
+                        l.hashes = Arc::new(loaded.hashes);
+                    }
+                    Err(e) => {
+                        self.push_log(format!("Blocklist {id} couldn't load: {e}"));
+                        if let Some(l) = self.lists.get_mut(&id) {
+                            l.status.error = Some(e);
+                        }
+                    }
+                }
+                self.rebuild_filter();
+            }
+            self.publish();
+            return;
+        }
         if seq != self.seq {
             return;
         }
@@ -721,6 +927,10 @@ impl Manager {
                         if let Some(id) = self.status.profile_id.clone() {
                             self.store.mark_connected(&id);
                         }
+                        // The server's names are kept off the blocklists.
+                        self.rebuild_filter();
+                        self.load_blocklists();
+                        self.sync_proxy();
                         if self.settings.split.enabled
                             && let Err(e) = self.start_split()
                         {
@@ -737,6 +947,7 @@ impl Manager {
                         self.status.connected_since = None;
                         self.dns_ready = false;
                         self.split.stop();
+                        self.stop_proxy();
                         self.refresh_split_status();
                     }
                     _ => {}
@@ -767,8 +978,7 @@ impl Manager {
                         && !self.dns_ready
                         && self.settings.dns == DnsMode::Vpn
                     {
-                        let (vpn, direct) = (self.vpn_dns(), self.direct_dns.clone());
-                        self.split.set_dns(&vpn, &direct);
+                        self.proxy_dns();
                         self.apply_dns();
                     }
                 }
@@ -785,8 +995,7 @@ impl Manager {
                         if !direct.is_empty() {
                             self.direct_dns = direct;
                         }
-                        let vpn = self.vpn_dns();
-                        self.split.set_dns(&vpn, &self.direct_dns);
+                        self.proxy_dns();
                     }
                     Err(e) => {
                         warn!("DNS: {e}");
@@ -797,7 +1006,7 @@ impl Manager {
                 self.sync_firewall();
                 self.publish();
             }
-            Event::GeoLoaded { .. } => {}
+            Event::GeoLoaded { .. } | Event::BlocklistLoaded { .. } => {}
             Event::NeedsInput {
                 request,
                 live,
@@ -832,6 +1041,7 @@ impl Manager {
                 // we were still connecting.
                 self.session = None;
                 self.split.stop();
+                self.stop_proxy();
                 self.refresh_split_status();
                 self.dns_ready = false;
                 let keep = std::mem::take(&mut self.status);
@@ -849,6 +1059,7 @@ impl Manager {
                 self.pending = None;
                 self.session_secrets = None;
                 self.split.stop();
+                self.stop_proxy();
                 let dropped = !self.user_stopped;
                 let error = self.status.error.take().or_else(|| {
                     dropped.then(|| {
@@ -878,7 +1089,7 @@ impl Manager {
     }
 
     fn publish(&self) {
-        let _ = self.notices.send(Notice::Status(self.status.clone()));
+        let _ = self.notices.send(Notice::Status(self.status()));
     }
 }
 
@@ -910,6 +1121,7 @@ mod tests {
             system: false,
             settings_path,
             geoip_dir: dir.path().join("geoip"),
+            blocklist_dir: dir.path().join("blocklists"),
         };
         Fixture {
             mgr: Manager::spawn(store, Arc::new(Mock), tx, platform),
@@ -1004,6 +1216,43 @@ mod tests {
         let m = f.mgr.lock().await;
         assert!(m.status().internet_blocked);
         assert!(m.plan().block);
+    }
+
+    #[tokio::test]
+    async fn blocklists_load_and_report() {
+        let mut f = setup().await;
+        let dir = f._dir.path().join("blocklists");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ads.txt"), "ads.example\ntracker.example\n").unwrap();
+        let s = Settings {
+            blocking: portal_core::BlockingSettings {
+                lists: vec!["ads".into()],
+                ..Default::default()
+            },
+            ..Settings::default()
+        };
+        f.mgr.lock().await.set_settings(s).unwrap();
+        let st = wait_for(&mut f.rx, |s| {
+            s.blocklists.first().is_some_and(|b| b.domains > 0)
+        })
+        .await;
+        assert_eq!(st.blocklists[0].id, "ads");
+        assert_eq!(st.blocklists[0].domains, 2);
+        assert!(!st.blocklists[0].loading);
+        {
+            let m = f.mgr.lock().await;
+            assert!(m.filter.blocks("cdn.ads.example"));
+            assert!(!m.filter.blocks("example.com"));
+        }
+        // Turning the list off frees it.
+        f.mgr
+            .lock()
+            .await
+            .set_settings(Settings::default())
+            .unwrap();
+        let m = f.mgr.lock().await;
+        assert!(m.status().blocklists.is_empty());
+        assert!(!m.filter.blocks("cdn.ads.example"));
     }
 
     #[tokio::test]

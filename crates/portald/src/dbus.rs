@@ -193,7 +193,7 @@ impl DaemonIface {
     }
 
     async fn get_status(&self) -> fdo::Result<String> {
-        to_json(self.mgr.lock().await.status())
+        to_json(&self.mgr.lock().await.status())
     }
 
     async fn get_log(&self) -> Vec<String> {

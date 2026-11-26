@@ -525,7 +525,7 @@ export function App() {
             </Button>
           ) : null}
           <ImportMenu onFiles={pickFiles} onFolder={pickFolder} />
-          <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => openSettings("firewall")} className="text-muted-foreground">
+          <Button variant="ghost" size="icon" aria-label="Settings" onClick={() => openSettings("split")} className="text-muted-foreground">
             <SlidersHorizontal />
           </Button>
           <button

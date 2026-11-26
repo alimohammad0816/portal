@@ -6,6 +6,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const TYPE_A: u16 = 1;
 const TYPE_AAAA: u16 = 28;
+const TYPE_CNAME: u16 = 5;
+/// How long clients may keep a blocked answer: short, so turning a
+/// category off takes effect quickly.
+const BLOCKED_TTL: u32 = 10;
 
 fn u16_at(b: &[u8], i: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?]))
@@ -98,6 +102,57 @@ pub fn answer_addresses(msg: &[u8]) -> Vec<(IpAddr, u32)> {
     out
 }
 
+/// Names the answer section's CNAME records point to, so trackers hidden
+/// behind a first-party name can be caught too.
+pub fn cname_targets(msg: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let _ = (|| -> Option<()> {
+        let qd = u16_at(msg, 4)?;
+        let an = u16_at(msg, 6)?;
+        let mut pos = 12;
+        for _ in 0..qd {
+            pos = read_name(msg, pos)?.1 + 4;
+        }
+        for _ in 0..an {
+            pos = read_name(msg, pos)?.1;
+            let ty = u16_at(msg, pos)?;
+            let len = u16_at(msg, pos + 8)? as usize;
+            if ty == TYPE_CNAME {
+                out.push(read_name(msg, pos + 10)?.0);
+            }
+            pos += 10 + len;
+        }
+        Some(())
+    })();
+    out
+}
+
+/// The reply for a blocked name: `0.0.0.0` for A, `::` for AAAA, and no
+/// records for anything else, so apps fail fast instead of retrying.
+pub fn blocked(query: &[u8]) -> Option<Vec<u8>> {
+    let end = read_name(query, 12)?.1;
+    let qtype = u16_at(query, end)?;
+    let mut r = query.get(..12)?.to_vec();
+    r[2] = 0x80 | (query[2] & 0x01); // QR, keep RD
+    r[3] = 0x80; // RA, NOERROR
+    r[4..6].copy_from_slice(&1u16.to_be_bytes());
+    r[6..12].fill(0);
+    r.extend_from_slice(query.get(12..end + 4)?);
+    let data: &[u8] = match qtype {
+        TYPE_A => &[0; 4],
+        TYPE_AAAA => &[0; 16],
+        _ => return Some(r),
+    };
+    r[7] = 1;
+    r.extend_from_slice(&[0xC0, 12]);
+    r.extend_from_slice(&qtype.to_be_bytes());
+    r.extend_from_slice(&1u16.to_be_bytes());
+    r.extend_from_slice(&BLOCKED_TTL.to_be_bytes());
+    r.extend_from_slice(&(data.len() as u16).to_be_bytes());
+    r.extend_from_slice(data);
+    Some(r)
+}
+
 /// A SERVFAIL reply to `query`, sent when no upstream answers.
 pub fn servfail(query: &[u8]) -> Option<Vec<u8>> {
     let mut r = query.get(..12)?.to_vec();
@@ -168,6 +223,51 @@ pub mod tests {
         loopy[12] = 0xC0;
         loopy[13] = 12;
         assert!(question_name(&loopy).is_none());
+    }
+
+    #[test]
+    fn builds_blocked_replies() {
+        let q = query(3, "ads.example");
+        let r = blocked(&q).unwrap();
+        assert_eq!(&r[..2], &3u16.to_be_bytes());
+        assert_eq!(r[3] & 0x0f, 0);
+        assert_eq!(question_name(&r).as_deref(), Some("ads.example"));
+        assert_eq!(
+            answer_addresses(&r),
+            vec![("0.0.0.0".parse().unwrap(), BLOCKED_TTL)]
+        );
+        // AAAA
+        let mut q6 = q.clone();
+        let n = q6.len();
+        q6[n - 3] = 28;
+        assert_eq!(
+            answer_addresses(&blocked(&q6).unwrap()),
+            vec![("::".parse().unwrap(), BLOCKED_TTL)]
+        );
+        // Anything else: no records.
+        q6[n - 3] = 65;
+        let r = blocked(&q6).unwrap();
+        assert_eq!(u16_at(&r, 6), Some(0));
+        assert!(answer_addresses(&r).is_empty());
+    }
+
+    #[test]
+    fn reads_cname_targets() {
+        let q = query(4, "metrics.shop.example");
+        let mut a = q.clone();
+        a[2] = 0x81;
+        a[3] = 0x80;
+        a[7] = 1;
+        a.extend_from_slice(&[0xC0, 12, 0, 5, 0, 1, 0, 0, 0, 60]);
+        let target = [&[7u8][..], b"tracker", &[3], b"net", &[0]].concat();
+        a.extend_from_slice(&(target.len() as u16).to_be_bytes());
+        a.extend_from_slice(&target);
+        assert_eq!(cname_targets(&a), vec!["tracker.net"]);
+        assert!(
+            cname_targets(&answer(&q, &[[1, 1, 1, 1]], 5))
+                .iter()
+                .all(|n| n == "metrics.shop.example")
+        );
     }
 
     #[test]

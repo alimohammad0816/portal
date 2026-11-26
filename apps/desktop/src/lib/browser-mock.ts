@@ -58,9 +58,41 @@ function firewallFields(s: Status): Partial<Status> {
 const log: string[] = [];
 let timers: number[] = [];
 
+/** Sizes of the real lists, to look plausible. */
+const listSizes: Record<string, number> = {
+  malware: 164740,
+  ads: 236709,
+  social: 8336,
+  adult: 80515,
+  gambling: 52611,
+  scams: 10702,
+  vpn: 16505,
+  crypto: 312,
+};
+const loadedLists = new Map<string, number>();
+
+function blocklistFields(): Partial<Status> {
+  return {
+    blocklists: settings.blocking.lists.map((id) => {
+      const at = loadedLists.get(id);
+      return { id, domains: at ? (listSizes[id] ?? 1000) : 0, updated_at: at ?? null, loading: !at, error: null };
+    }),
+  };
+}
+
+function loadLists() {
+  for (const id of settings.blocking.lists) {
+    if (loadedLists.has(id)) continue;
+    window.setTimeout(() => {
+      loadedLists.set(id, now() - 2 * 3600);
+      setStatus({});
+    }, 700 + Math.random() * 600);
+  }
+}
+
 function setStatus(s: Partial<Status>) {
   status = { ...status, ...s };
-  status = { ...status, ...firewallFields(status) };
+  status = { ...status, ...firewallFields(status), ...blocklistFields() };
   emit("portal://status", status);
 }
 
@@ -103,7 +135,14 @@ function startSession(id: string) {
         const rout = 700_000 + Math.random() * 800_000;
         rx += rin;
         tx += rout;
-        setStatus({ bytes_in: rx, bytes_out: tx, rate_in: rin, rate_out: rout });
+        const blocking = settings.blocking.lists.length > 0 || settings.blocking.block.length > 0;
+        setStatus({
+          bytes_in: rx,
+          bytes_out: tx,
+          rate_in: rin,
+          rate_out: rout,
+          blocked_queries: blocking ? status.blocked_queries + Math.floor(Math.random() * 4) : status.blocked_queries,
+        });
         timers.push(window.setTimeout(tick, 1000));
       };
       tick();
@@ -242,6 +281,7 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
         }
       }
       if (settings.firewall !== "auto") blockedAfterDrop = false;
+      loadLists();
       emit("portal://settings", settings);
       setStatus({});
       return settings;

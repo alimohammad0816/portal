@@ -269,6 +269,37 @@ namespace:
 cargo test -p portald --no-run && unshare -rn target/debug/deps/portald-* --ignored --test-threads=1 netns
 ```
 
+## Blocking
+
+Block ads, trackers and other categories for every app on the computer
+while you're connected, the way a filtering DNS resolver does. Each
+category is a public list:
+
+| Category | List |
+|---|---|
+| Malware & phishing | HaGeZi Threat Intelligence Feeds (mini) |
+| Ads & trackers | HaGeZi Multi PRO |
+| Social networks | HaGeZi Social Networks |
+| Adult content | HaGeZi NSFW |
+| Gambling | HaGeZi Gambling (mini) |
+| Scams & fakes | HaGeZi Fake |
+| Other VPNs & proxies | HaGeZi Encrypted DNS/VPN/Tor/Proxy Bypass |
+| Crypto miners | NoCoin |
+
+A listed domain is blocked with all its subdomains. **Always allow** and
+**Also block** take your own domains in the split rule syntax
+(`example.com` is just that name, `*.example.com` its subdomains). The
+names of the VPN server you're connected to are never blocked.
+
+How it works: the same forwarder on `127.0.0.153` that split tunneling
+uses runs whenever blocking is on, and answers blocked names itself with
+`0.0.0.0` / `::` (or no records for other types), also when an allowed
+name is a CNAME for a blocked one. Lists are downloaded by the service,
+cached in `/var/cache/portald/blocklists` and refreshed after a day; they
+stay in memory as sorted 64-bit hashes, about 5 MB with every category on.
+Browsers set to their own DNS-over-HTTPS skip it, so keep DNS leak
+protection on.
+
 ## Everyday conveniences
 
 - **Saved passwords** live in your keyring (GNOME Keyring, KWallet, ...)
@@ -302,6 +333,7 @@ gnome-extensions enable portal@alimohammad0816.github.io
    proxy gateway, GNOME quick settings tile.
 5. Done: key passphrases, dynamic and web sign-in, connection proxy,
    folder import, DCO and extra options per profile.
+6. Done: blocking ads, trackers and other categories through DNS.
 
 ## License
 

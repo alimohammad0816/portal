@@ -2,10 +2,13 @@
 //! tunnel's lookups here; queries for split domains go to the resolver on
 //! the side the traffic will use (so CDNs answer with nearby addresses),
 //! and the answers' addresses are added to the nft sets before the reply
-//! goes back, so the first connection is already routed right.
+//! goes back, so the first connection is already routed right. It also
+//! answers names on the blocklists (see `crate::blocking`) itself, and runs
+//! whenever split tunneling or blocking is on.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -21,6 +24,7 @@ use tracing::{debug, warn};
 
 use super::dnsmsg;
 use super::net::{self, MARK_DIRECT, MARK_TUNNEL};
+use crate::blocking::Filter;
 
 /// Where resolved sends the tunnel's lookups.
 pub const LISTEN: &str = "127.0.0.153:53";
@@ -32,13 +36,16 @@ const MAX_TTL: u32 = 6 * 3600;
 
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
-    pub mode: SplitMode,
+    /// Split tunneling's mode, or `None` when it's off and the proxy only
+    /// blocks.
+    pub mode: Option<SplitMode>,
     pub domains: DomainList,
     /// Resolvers on the VPN side (pushed or custom).
     pub vpn: Vec<IpAddr>,
     /// The physical network's resolvers.
     pub direct: Vec<IpAddr>,
     pub upstream_port: u16,
+    pub filter: Arc<Filter>,
 }
 
 pub type SharedConfig = Arc<RwLock<ProxyConfig>>;
@@ -180,7 +187,7 @@ fn route_for(cfg: &ProxyConfig, name: Option<&str>) -> Route {
     if r.upstreams.is_empty() {
         // The server pushed no resolvers: fall back to the physical network's.
         r.upstreams = cfg.direct.clone();
-        r.mark = if cfg.mode == SplitMode::Exclude {
+        r.mark = if cfg.mode == Some(SplitMode::Exclude) {
             MARK_DIRECT
         } else {
             0
@@ -190,8 +197,15 @@ fn route_for(cfg: &ProxyConfig, name: Option<&str>) -> Route {
 }
 
 fn route_for_inner(cfg: &ProxyConfig, name: Option<&str>) -> Route {
+    let Some(mode) = cfg.mode else {
+        return Route {
+            upstreams: cfg.vpn.clone(),
+            mark: 0,
+            record: false,
+        };
+    };
     let listed = name.is_some_and(|n| cfg.domains.matches(n));
-    match (cfg.mode, listed) {
+    match (mode, listed) {
         (SplitMode::Exclude, true) if !cfg.direct.is_empty() => Route {
             upstreams: cfg.direct.clone(),
             mark: MARK_DIRECT,
@@ -275,19 +289,33 @@ const fn libc_einprogress() -> i32 {
     115
 }
 
-/// Forward one query and record split answers. Always produces a reply.
-async fn resolve(
-    query: &[u8],
-    tcp: bool,
-    cfg: &SharedConfig,
-    learned: &Mutex<Learned>,
-    sink: &Sink,
-) -> Option<Vec<u8>> {
+/// Shared by the proxy's tasks.
+#[derive(Clone)]
+struct Ctx {
+    cfg: SharedConfig,
+    learned: Arc<Mutex<Learned>>,
+    sink: Sink,
+    blocked: Arc<AtomicU64>,
+}
+
+/// Forward one query and record split answers; answer blocked names
+/// directly. Always produces a reply.
+async fn resolve(query: &[u8], tcp: bool, ctx: &Ctx) -> Option<Vec<u8>> {
+    let (cfg, learned, sink) = (&ctx.cfg, &ctx.learned, &ctx.sink);
     let name = dnsmsg::question_name(query);
-    let (route, port) = {
+    let (route, port, filter) = {
         let c = cfg.read().ok()?;
-        (route_for(&c, name.as_deref()), c.upstream_port)
+        (
+            route_for(&c, name.as_deref()),
+            c.upstream_port,
+            c.filter.clone(),
+        )
     };
+    if name.as_deref().is_some_and(|n| filter.blocks(n)) {
+        debug!("blocked {name:?}");
+        ctx.blocked.fetch_add(1, Ordering::Relaxed);
+        return dnsmsg::blocked(query);
+    }
     for up in &route.upstreams {
         let target = SocketAddr::new(*up, port);
         let reply = if tcp {
@@ -297,6 +325,13 @@ async fn resolve(
         };
         match reply {
             Ok(r) => {
+                // A harmless name can be an alias for a tracker's.
+                if !filter.is_empty() && dnsmsg::cname_targets(&r).iter().any(|t| filter.blocks(t))
+                {
+                    debug!("blocked {name:?} (CNAME)");
+                    ctx.blocked.fetch_add(1, Ordering::Relaxed);
+                    return dnsmsg::blocked(query);
+                }
                 let addrs: Vec<(IpAddr, u32)> = dnsmsg::answer_addresses(&r)
                     .into_iter()
                     .map(|(ip, ttl)| (ip, ttl.clamp(MIN_TTL, MAX_TTL)))
@@ -325,6 +360,7 @@ async fn resolve(
 pub struct Proxy {
     pub config: SharedConfig,
     learned: Arc<Mutex<Learned>>,
+    blocked: Arc<AtomicU64>,
     tasks: Vec<JoinHandle<()>>,
     pub addr: SocketAddr,
 }
@@ -344,8 +380,15 @@ impl Proxy {
         let tcp = TcpListener::from_std(std_tcp)?;
         let config = Arc::new(RwLock::new(config));
         let learned = Arc::new(Mutex::new(Learned::default()));
+        let blocked = Arc::new(AtomicU64::new(0));
+        let ctx = Ctx {
+            cfg: config.clone(),
+            learned: learned.clone(),
+            sink,
+            blocked: blocked.clone(),
+        };
 
-        let (cfg, l, s) = (config.clone(), learned.clone(), sink.clone());
+        let c = ctx.clone();
         let udp_task = tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             loop {
@@ -356,22 +399,22 @@ impl Proxy {
                     continue;
                 }
                 let query = buf[..n].to_vec();
-                let (udp, cfg, l, s) = (udp.clone(), cfg.clone(), l.clone(), s.clone());
+                let (udp, c) = (udp.clone(), c.clone());
                 tokio::spawn(async move {
-                    if let Some(r) = resolve(&query, false, &cfg, &l, &s).await {
+                    if let Some(r) = resolve(&query, false, &c).await {
                         let _ = udp.send_to(&r, from).await;
                     }
                 });
             }
         });
 
-        let (cfg, l, s) = (config.clone(), learned.clone(), sink);
+        let c = ctx;
         let tcp_task = tokio::spawn(async move {
             loop {
                 let Ok((mut conn, _)) = tcp.accept().await else {
                     continue;
                 };
-                let (cfg, l, s) = (cfg.clone(), l.clone(), s.clone());
+                let c = c.clone();
                 tokio::spawn(async move {
                     while let Ok(Ok(len)) =
                         tokio::time::timeout(Duration::from_secs(10), conn.read_u16()).await
@@ -380,7 +423,7 @@ impl Proxy {
                         if conn.read_exact(&mut q).await.is_err() || q.len() < 12 {
                             break;
                         }
-                        let Some(r) = resolve(&q, true, &cfg, &l, &s).await else {
+                        let Some(r) = resolve(&q, true, &c).await else {
                             break;
                         };
                         if conn
@@ -399,6 +442,7 @@ impl Proxy {
         Ok(Proxy {
             config,
             learned,
+            blocked,
             tasks: vec![udp_task, tcp_task],
             addr,
         })
@@ -450,8 +494,13 @@ impl Proxy {
             .unwrap_or_default()
     }
 
-    pub fn stop(self) {
-        for t in self.tasks {
+    /// Lookups blocked since the proxy started.
+    pub fn blocked(&self) -> u64 {
+        self.blocked.load(Ordering::Relaxed)
+    }
+
+    pub fn stop(&self) {
+        for t in &self.tasks {
             t.abort();
         }
     }
@@ -485,8 +534,9 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let rules = [Rule::parse("*.ir").unwrap()];
         let cfg = ProxyConfig {
-            mode: SplitMode::Exclude,
+            mode: Some(SplitMode::Exclude),
             domains: DomainList::new(&rules),
+            filter: Arc::default(),
             // Both sides point at the fake upstream; marks need root, so
             // the direct side is left empty here.
             vpn: vec!["127.0.0.1".parse().unwrap()],
@@ -543,7 +593,8 @@ mod tests {
     #[tokio::test]
     async fn answers_servfail_when_upstreams_fail() {
         let cfg = ProxyConfig {
-            mode: SplitMode::Exclude,
+            mode: Some(SplitMode::Exclude),
+            filter: Arc::default(),
             domains: DomainList::default(),
             vpn: vec!["127.0.0.1".parse().unwrap()],
             direct: vec![],
@@ -562,6 +613,47 @@ mod tests {
         assert_eq!(buf[3] & 0x0f, 2);
         assert_eq!(&buf[..2], &5u16.to_be_bytes());
         assert!(n > 12);
+        proxy.stop();
+    }
+
+    #[tokio::test]
+    async fn answers_blocked_names_itself() {
+        let (port, _up) = upstream([93, 184, 216, 34]).await;
+        let settings = portal_core::BlockingSettings {
+            lists: vec!["ads".into()],
+            ..Default::default()
+        };
+        let list = crate::blocking::parse("ads.example\n");
+        let cfg = ProxyConfig {
+            mode: None,
+            domains: DomainList::default(),
+            vpn: vec!["127.0.0.1".parse().unwrap()],
+            direct: vec![],
+            upstream_port: port,
+            filter: Arc::new(Filter::new([list.as_slice()], &settings, vec![])),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let proxy = Proxy::start("127.0.0.1:0", cfg, Sink::Test(tx)).unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(proxy.addr).await.unwrap();
+        let mut buf = vec![0u8; 512];
+        client.send(&query(1, "cdn.ads.example")).await.unwrap();
+        let n = client.recv(&mut buf).await.unwrap();
+        assert_eq!(
+            dnsmsg::answer_addresses(&buf[..n]),
+            vec![("0.0.0.0".parse().unwrap(), 10)]
+        );
+        client.send(&query(2, "example.com")).await.unwrap();
+        let n = client.recv(&mut buf).await.unwrap();
+        assert_eq!(
+            dnsmsg::answer_addresses(&buf[..n])[0].0,
+            "93.184.216.34".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(proxy.blocked(), 1);
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing is split without split tunneling"
+        );
         proxy.stop();
     }
 
@@ -603,7 +695,8 @@ mod tests {
     fn routes_by_mode() {
         let rules = [Rule::parse("*.ir").unwrap()];
         let mut cfg = ProxyConfig {
-            mode: SplitMode::Exclude,
+            mode: Some(SplitMode::Exclude),
+            filter: Arc::default(),
             domains: DomainList::new(&rules),
             vpn: vec!["10.8.0.1".parse().unwrap()],
             direct: vec!["192.168.1.1".parse().unwrap()],
@@ -619,11 +712,18 @@ mod tests {
             (r.upstreams[0].to_string(), r.mark, r.record),
             ("10.8.0.1".into(), 0, false)
         );
-        cfg.mode = SplitMode::Include;
+        cfg.mode = Some(SplitMode::Include);
         let r = route_for(&cfg, Some("snapp.ir"));
         assert_eq!(
             (r.upstreams[0].to_string(), r.mark, r.record),
             ("10.8.0.1".into(), MARK_TUNNEL, true)
+        );
+        // Blocking only: everything goes to the VPN's resolvers, unmarked.
+        cfg.mode = None;
+        let r = route_for(&cfg, Some("snapp.ir"));
+        assert_eq!(
+            (r.upstreams[0].to_string(), r.mark, r.record),
+            ("10.8.0.1".into(), 0, false)
         );
     }
 }

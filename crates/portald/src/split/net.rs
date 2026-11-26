@@ -602,7 +602,8 @@ mod tests {
             }
         });
         let cfg = ProxyConfig {
-            mode: SplitMode::Exclude,
+            mode: Some(SplitMode::Exclude),
+            filter: std::sync::Arc::default(),
             domains: DomainList::new(&[Rule::parse("*.ir").unwrap()]),
             vpn: vec!["127.0.0.1".parse().unwrap()],
             direct: vec![],

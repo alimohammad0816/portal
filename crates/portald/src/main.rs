@@ -2,6 +2,7 @@
 //! system bus; `--session --mock` runs it as a normal user for UI work.
 
 mod backend;
+mod blocking;
 mod dbus;
 mod dns;
 mod firewall;
@@ -99,6 +100,7 @@ async fn main() -> Result<()> {
         system: !args.session,
         settings_path: state_dir.join("settings.json"),
         geoip_dir: cache_dir.join("geoip"),
+        blocklist_dir: cache_dir.join("blocklists"),
     };
     let mgr = Manager::spawn(store, backend, notice_tx, platform);
     let iface = DaemonIface {
