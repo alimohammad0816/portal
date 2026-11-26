@@ -330,7 +330,8 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
         enabled: true,
         available: {
           version: "0.2.0",
-          notes: "- Kill switch\n- DNS leak protection",
+          notes:
+            "- Blocking: ads, trackers and other categories through DNS\n- Update dialog: show `download` progress\n- Dialogs: keep the window's **rounded corners** under the overlay\n\n**Full changelog**: [v0.1.9...v0.1.10](https://github.com/alimohammad0816/portal/compare/v0.1.9...v0.1.10)",
           url: "https://github.com/",
           published_at: new Date().toISOString(),
         },

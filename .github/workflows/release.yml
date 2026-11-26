@@ -190,6 +190,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Every commit and tag, for the release notes.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -227,9 +230,14 @@ jobs:
           done
           (cd out && sha256sum * > SHA256SUMS)
 
+      # GitHub's generated notes list pull requests, and this repo commits
+      # to main, so they'd only hold a link. The update dialog shows these.
+      - name: Release notes
+        run: scripts/release-notes.sh "$GITHUB_REF_NAME" "$GITHUB_REPOSITORY" | tee "$RUNNER_TEMP/notes.md"
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           name: Portal ${{ needs.build.outputs.version }}
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md
           files: out/*

@@ -2,6 +2,7 @@ import { Download, ExternalLink, Loader2 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
 
+import { ReleaseNotes } from "@/components/ReleaseNotes";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollFade } from "@/components/ui/scroll-fade";
@@ -71,8 +72,8 @@ export function UpdateDialog({
         </DialogHeader>
         {release?.notes && (
           <div className="overflow-hidden rounded-lg border bg-subtle/50">
-            <ScrollFade className="selectable max-h-56 overflow-y-auto px-3 py-2.5 text-[13.5px] leading-6 whitespace-pre-line text-zinc-300">
-              {release.notes}
+            <ScrollFade className="selectable max-h-56 overflow-y-auto px-3 py-2.5 text-[13.5px] leading-6 text-zinc-300">
+              <ReleaseNotes markdown={release.notes} />
             </ScrollFade>
           </div>
         )}
