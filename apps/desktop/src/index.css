@@ -6,6 +6,10 @@
 /* shadcn/ui, zinc base color, dark only for now. */
 :root {
   --radius: 0.625rem;
+  /* The window is transparent and frameless; this rounds it. Anything that
+     covers the whole window (dialog overlays) must use it too, or it paints
+     over the transparent corners and squares them off. */
+  --window-radius: 14px;
   --background: oklch(0.141 0.005 285.823);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.141 0.005 285.823);

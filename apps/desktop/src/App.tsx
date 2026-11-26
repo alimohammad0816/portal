@@ -493,7 +493,7 @@ export function App() {
   const error = notice ?? status.error;
 
   return (
-    <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[14px] border bg-background">
+    <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[var(--window-radius)] border bg-background">
       {/* Title bar */}
       <header data-tauri-drag-region className="flex h-[52px] shrink-0 items-center justify-between pr-2.5 pl-4">
         <div data-tauri-drag-region className="flex items-center gap-2.5">
