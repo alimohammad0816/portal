@@ -16,6 +16,13 @@ case $kind in
     if command -v dnf >/dev/null; then
       dnf install -y -q "./$pkg"
     else
+      # Mirrors are sometimes caught mid-sync, listing metadata they don't
+      # have yet; zypper then skips the whole repo. Give them a moment.
+      for i in 1 2 3 4 5; do
+        zypper --non-interactive --quiet refresh --force && break
+        echo "repositories didn't refresh, retrying ($i)" >&2
+        sleep 20
+      done
       zypper --non-interactive --quiet install --allow-unsigned-rpm "./$pkg"
     fi
     ;;
