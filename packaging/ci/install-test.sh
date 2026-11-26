@@ -16,8 +16,11 @@ case $kind in
     if command -v dnf >/dev/null; then
       dnf install -y -q "./$pkg"
     else
-      # Mirrors are sometimes caught mid-sync, listing metadata they don't
-      # have yet; zypper then skips the whole repo. Give them a moment.
+      # download.opensuse.org redirects to mirrors that are sometimes caught
+      # mid-sync, listing metadata they don't have yet, and zypper then
+      # skips the whole repo. openSUSE's CDN serves a consistent copy; the
+      # retries cover what's left.
+      sed -i 's#https\?://download.opensuse.org/#http://cdn.opensuse.org/#' /etc/zypp/repos.d/*.repo
       for i in 1 2 3 4 5; do
         zypper --non-interactive --quiet refresh --force && break
         echo "repositories didn't refresh, retrying ($i)" >&2
