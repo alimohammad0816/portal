@@ -335,9 +335,17 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
           published_at: new Date().toISOString(),
         },
       };
-    case "install_update":
-      await new Promise((r) => setTimeout(r, 1500));
+    case "install_update": {
+      const total = 12_300_000;
+      for (let got = 0; got < total; got += 410_000) {
+        emit("portal://update-progress", { phase: "download", downloaded: got, total });
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      emit("portal://update-progress", { phase: "download", downloaded: total, total });
+      emit("portal://update-progress", { phase: "install", downloaded: 0, total: null });
+      await new Promise((r) => setTimeout(r, 1200));
       return "0.2.0";
+    }
     case "restart_app":
       location.reload();
       return null;

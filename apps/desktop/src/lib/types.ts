@@ -185,6 +185,14 @@ export interface UpdateInfo {
   available: Release | null;
 }
 
+/** How far installing an update got. */
+export interface UpdateProgress {
+  /** `download`, then `install` while the service verifies and installs. */
+  phase: "download" | "install";
+  downloaded: number;
+  total: number | null;
+}
+
 export interface Versions {
   app: string;
   daemon: string | null;

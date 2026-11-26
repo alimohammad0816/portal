@@ -458,8 +458,18 @@ async fn check_update(updates: State<'_, Updates>) -> Result<updater::UpdateInfo
     Ok(info)
 }
 
+/// How far `install_update` got, for the update dialog.
+#[derive(Serialize, Clone)]
+struct UpdateProgress {
+    /// `download`, then `install` while the service verifies and installs.
+    phase: &'static str,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
 #[tauri::command]
 async fn install_update(
+    app: AppHandle,
     daemon: State<'_, Daemon>,
     updates: State<'_, Updates>,
 ) -> Result<String, String> {
@@ -470,7 +480,36 @@ async fn install_update(
         .await
         .clone()
         .ok_or("There's no update to install.")?;
-    let (path, signature) = updater::download(&rel).await?;
+    // A chunk is a few KB: report each whole percent (or each 256 KB when
+    // the size is unknown), not every chunk.
+    let last = std::sync::Mutex::new(None::<u64>);
+    let (path, signature) = updater::download(&rel, |downloaded, total| {
+        let step = match total {
+            Some(t) => downloaded * 100 / t,
+            None => downloaded >> 18,
+        };
+        let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+        if *last != Some(step) || Some(downloaded) == total {
+            *last = Some(step);
+            let _ = app.emit(
+                "portal://update-progress",
+                UpdateProgress {
+                    phase: "download",
+                    downloaded,
+                    total,
+                },
+            );
+        }
+    })
+    .await?;
+    let _ = app.emit(
+        "portal://update-progress",
+        UpdateProgress {
+            phase: "install",
+            downloaded: 0,
+            total: None,
+        },
+    );
     let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     let d = daemon.get().await?;
     let version = d

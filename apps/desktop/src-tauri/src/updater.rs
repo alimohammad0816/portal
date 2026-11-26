@@ -62,6 +62,20 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// For the package itself: no limit on the whole download, which takes
+/// minutes on a slow link, only on connecting and on stalling.
+fn download_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Packages are around 12 MB; anything far bigger isn't ours.
+const MAX_PACKAGE: u64 = 256 << 20;
+
 pub async fn check() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let Some(repo) = UPDATE_REPO else {
@@ -130,7 +144,11 @@ pub async fn check() -> Result<UpdateInfo, String> {
 }
 
 /// Download the package and its signature into the user's cache.
-pub async fn download(rel: &Release) -> Result<(PathBuf, String), String> {
+/// `progress` hears the bytes received so far and the size, if known.
+pub async fn download(
+    rel: &Release,
+    progress: impl Fn(u64, Option<u64>),
+) -> Result<(PathBuf, String), String> {
     let http = client()?;
     let sig = http
         .get(&rel.sig_url)
@@ -141,15 +159,26 @@ pub async fn download(rel: &Release) -> Result<(PathBuf, String), String> {
         .text()
         .await
         .map_err(|e| e.to_string())?;
-    let bytes = http
+    let failed = |e: reqwest::Error| format!("Downloading the update failed: {e}");
+    let mut resp = download_client()?
         .get(&rel.package_url)
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("Downloading the update failed: {e}"))?
-        .bytes()
-        .await
-        .map_err(|e| format!("Downloading the update failed: {e}"))?;
+        .map_err(failed)?;
+    let total = resp.content_length().filter(|n| *n > 0);
+    if total.is_some_and(|n| n > MAX_PACKAGE) {
+        return Err("The update is unexpectedly large.".into());
+    }
+    let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
+    progress(0, total);
+    while let Some(chunk) = resp.chunk().await.map_err(failed)? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() as u64 > MAX_PACKAGE {
+            return Err("The update is unexpectedly large.".into());
+        }
+        progress(bytes.len() as u64, total);
+    }
 
     let dir = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)

@@ -16,6 +16,7 @@ import type {
   Settings,
   Status,
   UpdateInfo,
+  UpdateProgress,
   Versions,
 } from "./types";
 
@@ -78,6 +79,10 @@ export function onLog(cb: (line: string) => void): Promise<UnlistenFn> {
 
 export function onSettings(cb: (s: Settings) => void): Promise<UnlistenFn> {
   return listen<Settings>("portal://settings", (e) => cb(e.payload));
+}
+
+export function onUpdateProgress(cb: (p: UpdateProgress) => void): Promise<UnlistenFn> {
+  return listen<UpdateProgress>("portal://update-progress", (e) => cb(e.payload));
 }
 
 export function onNetwork(cb: (n: Network | null) => void): Promise<UnlistenFn> {
