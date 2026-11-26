@@ -30,6 +30,8 @@ use crate::split::dnsproxy::{self, Proxy, ProxyConfig, Sink};
 use crate::split::{Link, Split, geoip};
 
 const LOG_LINES: usize = 500;
+/// How often to look for blocklists that are due for a download.
+const BLOCKLIST_CHECK: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Something clients should hear about.
 #[derive(Debug, Clone)]
@@ -194,6 +196,20 @@ impl Manager {
             while let Some((seq, event)) = rx.recv().await {
                 let Some(mgr) = weak.upgrade() else { break };
                 mgr.lock().await.on_event(seq, event);
+            }
+        });
+        // Lists age while the service runs, connected or not.
+        let weak = Arc::downgrade(&mgr);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(BLOCKLIST_CHECK);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let Some(mgr) = weak.upgrade() else { break };
+                let mut m = mgr.lock().await;
+                if m.load_lists(false) > 0 {
+                    m.publish();
+                }
             }
         });
         mgr
@@ -378,6 +394,23 @@ impl Manager {
     /// or downloaded when it's missing or a day old. Lists turned off are
     /// dropped from memory.
     fn load_blocklists(&mut self) {
+        self.load_lists(false);
+    }
+
+    /// Download every list that's on now, even if it's fresh.
+    pub fn update_blocklists(&mut self) -> Result<()> {
+        if self.settings.blocking.lists.is_empty() {
+            bail!("No blocklists are on.");
+        }
+        self.load_lists(true);
+        self.publish();
+        Ok(())
+    }
+
+    /// Start loading the lists that need it (all of them with `force`);
+    /// returns how many started.
+    fn load_lists(&mut self, force: bool) -> usize {
+        let mut started = 0;
         let on = self.settings.blocking.lists.clone();
         self.lists.retain(|id, _| on.contains(id));
         let stale = |l: &List| {
@@ -396,24 +429,26 @@ impl Manager {
                     ..BlocklistStatus::default()
                 },
             });
-            let need = entry.status.updated_at.is_none() || stale(entry);
+            let need = force || entry.status.updated_at.is_none() || stale(entry);
             if entry.status.loading || !need {
                 continue;
             }
             entry.status.loading = true;
+            started += 1;
             let (dir, events, seq) = (
                 self.platform.blocklist_dir.clone(),
                 self.events.clone(),
                 self.seq,
             );
             tokio::spawn(async move {
-                let result = crate::blocking::load(&dir, list)
+                let result = crate::blocking::load(&dir, list, force)
                     .await
                     .map_err(|e| format!("{e:#}"));
                 let _ = events.send((seq, Event::BlocklistLoaded { id, result }));
             });
         }
         self.rebuild_filter();
+        started
     }
 
     /// Put the loaded lists and the user's rules together for the proxy.
@@ -1250,9 +1285,10 @@ mod tests {
             .await
             .set_settings(Settings::default())
             .unwrap();
-        let m = f.mgr.lock().await;
+        let mut m = f.mgr.lock().await;
         assert!(m.status().blocklists.is_empty());
         assert!(!m.filter.blocks("cdn.ads.example"));
+        assert!(m.update_blocklists().is_err(), "nothing to update");
     }
 
     #[tokio::test]

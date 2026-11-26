@@ -410,6 +410,11 @@ async fn apply_split(daemon: State<'_, Daemon>) -> Result<u32, String> {
 }
 
 #[tauri::command]
+async fn update_blocklists(daemon: State<'_, Daemon>) -> Result<(), String> {
+    daemon.get().await?.update_blocklists().await.map_err(err)
+}
+
+#[tauri::command]
 async fn get_log(daemon: State<'_, Daemon>) -> Result<Vec<String>, String> {
     daemon.get().await?.get_log().await.map_err(err)
 }
@@ -925,6 +930,7 @@ pub fn run() {
             get_settings,
             set_settings,
             apply_split,
+            update_blocklists,
             list_apps,
             get_prefs,
             set_prefs,

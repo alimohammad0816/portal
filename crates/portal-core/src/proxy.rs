@@ -44,6 +44,10 @@ pub trait Daemon {
     fn split_self(&self) -> zbus::Result<()>;
     fn apply_split(&self) -> zbus::Result<u32>;
 
+    /// Download the blocklists that are on again, even if they're fresh.
+    /// Progress shows in the status.
+    fn update_blocklists(&self) -> zbus::Result<()>;
+
     /// Current `Settings` as JSON.
     fn get_settings(&self) -> zbus::Result<String>;
 

@@ -136,12 +136,13 @@ async fn parse_file(path: PathBuf) -> Result<Vec<u64>> {
     .await?
 }
 
-/// The list from the cache when it's fresh, otherwise from the network.
-/// Falls back to an older cached copy when the download fails.
-pub async fn load(dir: &Path, list: &Blocklist) -> Result<Loaded> {
+/// The list from the cache when it's fresh (unless `force`), otherwise
+/// from the network. Falls back to an older cached copy when the download
+/// fails.
+pub async fn load(dir: &Path, list: &Blocklist, force: bool) -> Result<Loaded> {
     let path = path_for(dir, list);
     let age = modified(&path).and_then(|t| SystemTime::now().duration_since(t).ok());
-    if age.is_some_and(|a| a < MAX_AGE) {
+    if !force && age.is_some_and(|a| a < MAX_AGE) {
         let hashes = parse_file(path.clone()).await?;
         if !hashes.is_empty() {
             return Ok(Loaded {
@@ -331,7 +332,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let list = portal_core::blocking::blocklist("ads").unwrap();
         std::fs::write(dir.path().join("ads.txt"), "ads.example\n").unwrap();
-        let l = load(dir.path(), list).await.unwrap();
+        let l = load(dir.path(), list, false).await.unwrap();
         assert_eq!(l.hashes, vec![hash("ads.example")]);
         assert!(l.stale.is_none());
         assert!(l.updated_at > 0);

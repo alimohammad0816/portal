@@ -295,8 +295,9 @@ How it works: the same forwarder on `127.0.0.153` that split tunneling
 uses runs whenever blocking is on, and answers blocked names itself with
 `0.0.0.0` / `::` (or no records for other types), also when an allowed
 name is a CNAME for a blocked one. Lists are downloaded by the service,
-cached in `/var/cache/portald/blocklists` and refreshed after a day; they
-stay in memory as sorted 64-bit hashes, about 5 MB with every category on.
+cached in `/var/cache/portald/blocklists` and downloaded again once they're
+a day old (checked hourly, connected or not); **Update now** fetches them
+right away. They stay in memory as sorted 64-bit hashes, about 5 MB with every category on.
 Browsers set to their own DNS-over-HTTPS skip it, so keep DNS leak
 protection on.
 

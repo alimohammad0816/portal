@@ -1,11 +1,11 @@
-import { AlertCircle, Bug, Dices, Eye, EyeOff, Fish, Loader2, Pickaxe, Share2, ShieldOff } from "lucide-react";
+import { AlertCircle, Bug, Dices, Eye, EyeOff, Fish, Loader2, Pickaxe, RefreshCw, Share2, ShieldOff } from "lucide-react";
 import { useState } from "react";
 
 import { HostList, hostKey, hostKind, Section, validHost } from "@/components/SplitSettings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import type { BlockingSettings as Blocking, BlocklistStatus, Settings, Status } from "@/lib/api";
+import { api, errorText, type BlockingSettings as Blocking, type BlocklistStatus, type Settings, type Status } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -25,11 +25,11 @@ const count = new Intl.NumberFormat("en-US");
 
 function listLine(on: boolean, hint: string, st: BlocklistStatus | undefined) {
   if (!on) return <span>{hint}</span>;
-  if (!st || (st.loading && st.domains === 0))
+  if (!st || st.loading)
     return (
       <span className="flex items-center gap-1">
         <Loader2 className="size-3 animate-spin" />
-        Downloading the list…
+        {st && st.domains > 0 ? "Updating the list…" : "Downloading the list…"}
       </span>
     );
   if (st.domains === 0)
@@ -123,6 +123,17 @@ export function BlockingSettings({
   const set = (patch: Partial<Blocking>) => onChange({ ...settings, blocking: { ...b, ...patch } });
   const active = b.lists.length > 0 || b.block.length > 0;
   const connected = status.state === "connected";
+  const updating = status.blocklists.some((l) => l.loading);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  async function updateNow() {
+    setUpdateError(null);
+    try {
+      await api.updateBlocklists();
+    } catch (e) {
+      setUpdateError(errorText(e));
+    }
+  }
 
   function toggle(id: string, on: boolean) {
     // Keep the daemon's order so the settings file stays tidy.
@@ -132,16 +143,25 @@ export function BlockingSettings({
 
   return (
     <div className="grid gap-3 pt-1">
-      <div className="grid gap-1">
-        <span className="text-[13.5px] font-medium">Blocking</span>
-        <span className="text-xs leading-5 text-muted-foreground">
-          {active && connected
-            ? `On · ${count.format(status.blocked_queries)} lookup${status.blocked_queries === 1 ? "" : "s"} blocked this session.`
-            : active
-              ? "Starts when you connect, for every app on this computer."
-              : "Block categories of sites for every app, through DNS, while you're connected."}
-        </span>
+      <div className="flex items-center justify-between gap-4">
+        <div className="grid gap-1">
+          <span className="text-[13.5px] font-medium">Blocking</span>
+          <span className="text-xs leading-5 text-muted-foreground">
+            {active && connected
+              ? `On · ${count.format(status.blocked_queries)} lookup${status.blocked_queries === 1 ? "" : "s"} blocked this session.`
+              : active
+                ? "Starts when you connect, for every app on this computer."
+                : "Block categories of sites for every app, through DNS, while you're connected."}
+          </span>
+        </div>
+        {b.lists.length > 0 && (
+          <Button size="sm" variant="outline" disabled={updating} onClick={updateNow}>
+            <RefreshCw className={cn(updating && "animate-spin")} />
+            Update now
+          </Button>
+        )}
       </div>
+      {updateError && <p className="text-xs text-destructive">{updateError}</p>}
 
       <div className="grid rounded-xl border">
         {CATEGORIES.map((c) => {
@@ -188,7 +208,7 @@ export function BlockingSettings({
       />
 
       <p className="text-[12px] leading-4 text-dim">
-        Lists come from HaGeZi's DNS blocklists and NoCoin and refresh daily. Blocked names get an empty answer, so
+        Lists come from HaGeZi's DNS blocklists and NoCoin and update by themselves once a day. Blocked names get an empty answer, so
         pages load without them. Browsers set to their own secure DNS skip blocking; keep DNS leak protection on.
       </p>
     </div>

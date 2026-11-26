@@ -75,18 +75,29 @@ function blocklistFields(): Partial<Status> {
   return {
     blocklists: settings.blocking.lists.map((id) => {
       const at = loadedLists.get(id);
-      return { id, domains: at ? (listSizes[id] ?? 1000) : 0, updated_at: at ?? null, loading: !at, error: null };
+      return {
+        id,
+        domains: at ? (listSizes[id] ?? 1000) : 0,
+        updated_at: at ?? null,
+        loading: !at || updatingLists.has(id),
+        error: null,
+      };
     }),
   };
 }
 
-function loadLists() {
+const updatingLists = new Set<string>();
+
+function loadLists(force = false) {
   for (const id of settings.blocking.lists) {
-    if (loadedLists.has(id)) continue;
+    if ((loadedLists.has(id) && !force) || updatingLists.has(id)) continue;
+    updatingLists.add(id);
+    const fresh = loadedLists.has(id);
     window.setTimeout(() => {
-      loadedLists.set(id, now() - 2 * 3600);
+      updatingLists.delete(id);
+      loadedLists.set(id, fresh ? now() : now() - 2 * 3600);
       setStatus({});
-    }, 700 + Math.random() * 600);
+    }, 900 + Math.random() * 900);
   }
 }
 
@@ -285,6 +296,11 @@ export const mockInvoke = async (cmd: string, args: Record<string, unknown> = {}
       emit("portal://settings", settings);
       setStatus({});
       return settings;
+    case "update_blocklists":
+      if (settings.blocking.lists.length === 0) throw "No blocklists are on.";
+      loadLists(true);
+      setStatus({});
+      return;
     case "apply_split":
       setStatus({ split_pending: false });
       return 3;

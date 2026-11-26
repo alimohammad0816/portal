@@ -229,6 +229,15 @@ impl DaemonIface {
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }
 
+    async fn update_blocklists(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> fdo::Result<()> {
+        self.authorize(conn, &hdr, ACTION_SETTINGS).await?;
+        self.mgr.lock().await.update_blocklists().map_err(failed)
+    }
+
     async fn get_settings(&self) -> fdo::Result<String> {
         to_json(self.mgr.lock().await.settings())
     }
